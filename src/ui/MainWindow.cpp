@@ -32,6 +32,7 @@
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTableView>
+#include <QTemporaryDir>
 #include <QTextDocument>
 #include <QToolBar>
 #include <QTreeView>
@@ -39,6 +40,7 @@
 #include <QVBoxLayout>
 
 #ifdef LATEXAPP_HAS_QTPDF
+#include <QtPdf/QPdfPageNavigator>
 #include <QtPdfWidgets/QPdfView>
 #endif
 
@@ -50,7 +52,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_autoCompileTimer.setInterval(1200);
     m_autoCompileTimer.setSingleShot(true);
-    connect(&m_autoCompileTimer, &QTimer::timeout, this, &MainWindow::compileProject);
+    connect(&m_autoCompileTimer, &QTimer::timeout, this, &MainWindow::compileLivePreview);
 
     connect(&m_buildManager, &BuildManager::buildStarted, this, &MainWindow::onBuildStarted);
     connect(&m_buildManager, &BuildManager::buildOutput, this, &MainWindow::onBuildOutput);
@@ -59,7 +61,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_projectService, &ProjectService::projectChanged, this, [this](const QString &projectRoot) {
         setProjectRootInTree(projectRoot);
         if (m_autoCompileAction) {
-            m_autoCompileAction->setChecked(m_projectService.config().autoCompile);
+            QSignalBlocker blocker(m_autoCompileAction);
+            m_autoCompileAction->setChecked(m_liveCompileEnabled);
         }
         updateWindowTitle();
         addRecentProject(projectRoot);
@@ -74,6 +77,8 @@ MainWindow::MainWindow(QWidget *parent)
     updateWindowTitle();
     resize(1500, 920);
 }
+
+MainWindow::~MainWindow() = default;
 
 void MainWindow::openStartupPath(const QString &path)
 {
@@ -131,16 +136,15 @@ void MainWindow::createActions()
     addAction(projectMenu, QStringLiteral("Copy Project"), QKeySequence(), &MainWindow::copyProject);
     addAction(projectMenu, QStringLiteral("Export Project ZIP"), QKeySequence(), &MainWindow::exportProjectZip);
     projectMenu->addSeparator();
-    m_autoCompileAction = projectMenu->addAction(QStringLiteral("Auto Compile on Save"));
+    m_autoCompileAction = projectMenu->addAction(QStringLiteral("Live Compile on Edit"));
     m_autoCompileAction->setCheckable(true);
+    m_autoCompileAction->setChecked(true);
     connect(m_autoCompileAction, &QAction::toggled, this, [this](bool enabled) {
-        if (m_projectService.projectRoot().isEmpty() || !m_standaloneFilePath.isEmpty()) {
-            return;
+        m_liveCompileEnabled = enabled;
+        if (!enabled) {
+            m_autoCompileTimer.stop();
+            m_livePreviewQueued = false;
         }
-        auto config = m_projectService.config();
-        config.autoCompile = enabled;
-        m_projectService.setConfig(config);
-        m_projectService.saveConfig(nullptr);
     });
     addAction(toolsMenu, QStringLiteral("Preferences"), QKeySequence::Preferences, &MainWindow::showPreferences);
 }
@@ -412,7 +416,7 @@ void MainWindow::openStandaloneFilePath(const QString &path)
     m_projectTree->setVisible(false);
     if (m_autoCompileAction) {
         QSignalBlocker blocker(m_autoCompileAction);
-        m_autoCompileAction->setChecked(false);
+        m_autoCompileAction->setChecked(m_liveCompileEnabled);
     }
     updateWindowTitle();
     showWorkspacePage();
@@ -465,6 +469,120 @@ ProjectConfig MainWindow::activeBuildConfig() const
         return config;
     }
     return m_projectService.config();
+}
+
+bool MainWindow::preparePreviewSnapshot(QString *previewRoot, ProjectConfig *previewConfig, QString *errorMessage)
+{
+    const auto sourceRoot = activeBuildRoot();
+    if (sourceRoot.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("No file or project is open.");
+        }
+        return false;
+    }
+
+    const auto config = activeBuildConfig();
+
+    m_pendingPreviewBuildRoot = std::make_unique<QTemporaryDir>();
+    if (!m_pendingPreviewBuildRoot->isValid()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Could not create a temporary preview folder.");
+        }
+        return false;
+    }
+
+    const auto mirrorRoot = m_pendingPreviewBuildRoot->path();
+    const auto sourceCanonical = QFileInfo(sourceRoot).canonicalFilePath();
+    if (!m_standaloneFilePath.isEmpty()) {
+        const auto mainSourcePath = QFileInfo(m_standaloneFilePath).canonicalFilePath();
+        const auto mainTargetPath = QDir(mirrorRoot).filePath(QFileInfo(mainSourcePath).fileName());
+        if (!QFile::copy(mainSourcePath, mainTargetPath)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Could not copy the source file into the preview folder.");
+            }
+            return false;
+        }
+    } else {
+        if (!copyDirectoryForPreview(sourceCanonical, mirrorRoot, sourceCanonical, config.outputDirectory, errorMessage)) {
+            return false;
+        }
+    }
+
+    if (!writeOpenEditorsToPreview(sourceCanonical, mirrorRoot, errorMessage)) {
+        return false;
+    }
+
+    m_previewSourceRoot = sourceCanonical;
+    m_previewMirrorRoot = mirrorRoot;
+    if (previewRoot) {
+        *previewRoot = mirrorRoot;
+    }
+    if (previewConfig) {
+        *previewConfig = config;
+    }
+    return true;
+}
+
+bool MainWindow::writeOpenEditorsToPreview(const QString &sourceRoot, const QString &previewRoot, QString *errorMessage) const
+{
+    const QDir sourceDirectory(sourceRoot);
+    const QDir previewDirectory(previewRoot);
+
+    for (auto it = m_openEditors.cbegin(); it != m_openEditors.cend(); ++it) {
+        auto *editor = it.value().data();
+        if (!editor) {
+            continue;
+        }
+
+        const auto editorPath = QFileInfo(editor->filePath()).canonicalFilePath();
+        const auto relativePath = sourceDirectory.relativeFilePath(editorPath);
+        if (relativePath.startsWith(QStringLiteral("..")) || QFileInfo(relativePath).isAbsolute()) {
+            continue;
+        }
+
+        const auto targetPath = previewDirectory.filePath(relativePath);
+        QDir targetDirectory = QFileInfo(targetPath).absoluteDir();
+        if (!targetDirectory.exists() && !targetDirectory.mkpath(QStringLiteral("."))) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Could not create preview folder for %1.").arg(relativePath);
+            }
+            return false;
+        }
+
+        QFile targetFile(targetPath);
+        if (!targetFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            if (errorMessage) {
+                *errorMessage = targetFile.errorString();
+            }
+            return false;
+        }
+        targetFile.write(editor->toPlainText().toUtf8());
+    }
+
+    return true;
+}
+
+QVector<Diagnostic> MainWindow::mapPreviewDiagnostics(QVector<Diagnostic> diagnostics) const
+{
+    if (!m_currentBuildIsPreview || m_previewMirrorRoot.isEmpty() || m_previewSourceRoot.isEmpty()) {
+        return diagnostics;
+    }
+
+    const QDir previewDirectory(m_previewMirrorRoot);
+    const QDir sourceDirectory(m_previewSourceRoot);
+    for (auto &diagnostic : diagnostics) {
+        if (diagnostic.filePath.isEmpty()) {
+            continue;
+        }
+
+        const auto relativePath = previewDirectory.relativeFilePath(diagnostic.filePath);
+        if (relativePath.startsWith(QStringLiteral("..")) || QFileInfo(relativePath).isAbsolute()) {
+            continue;
+        }
+        diagnostic.filePath = sourceDirectory.filePath(relativePath);
+    }
+
+    return diagnostics;
 }
 
 LatexEditor *MainWindow::currentEditor() const
@@ -555,10 +673,55 @@ bool MainWindow::saveAll()
 
 void MainWindow::scheduleAutoCompile()
 {
-    if (!m_projectService.config().autoCompile || m_projectService.projectRoot().isEmpty()) {
+    if (!m_liveCompileEnabled || activeBuildRoot().isEmpty()) {
         return;
     }
     m_autoCompileTimer.start();
+}
+
+void MainWindow::compileLivePreview()
+{
+    if (!m_liveCompileEnabled || activeBuildRoot().isEmpty()) {
+        return;
+    }
+
+    if (m_buildManager.isRunning()) {
+        m_livePreviewQueued = true;
+        statusBar()->showMessage(QStringLiteral("Live preview queued..."), 3000);
+        return;
+    }
+
+    m_livePreviewQueued = false;
+
+    QString previewRoot;
+    ProjectConfig previewConfig;
+    QString error;
+    if (!preparePreviewSnapshot(&previewRoot, &previewConfig, &error)) {
+        statusBar()->showMessage(QStringLiteral("Live preview skipped: %1").arg(error), 7000);
+        return;
+    }
+
+    const auto latexmk = m_environmentService.preferredLatexmkPath();
+    const auto pdflatex = m_environmentService.preferredPdflatexPath();
+    const auto hasPerl = m_environmentService.hasPerlAvailable();
+
+    m_currentBuildIsPreview = true;
+    if (!latexmk.isEmpty() && hasPerl) {
+        m_buildManager.build(previewRoot, previewConfig, latexmk, BuildEngine::Latexmk);
+        m_buildOutput->appendPlainText(QStringLiteral("Live preview is compiling an unsaved temporary snapshot.\n\n"));
+        return;
+    }
+
+    if (!pdflatex.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Live preview using pdflatex fallback because Perl was not found"), 7000);
+        m_buildManager.build(previewRoot, previewConfig, pdflatex, BuildEngine::PdfLatex);
+        m_buildOutput->appendPlainText(QStringLiteral("Live preview is compiling an unsaved temporary snapshot.\nlatexmk requires Perl, which was not found. Falling back to pdflatex for this build.\nFor full latexmk support, install Strawberry Perl: %1\n\n")
+            .arg(LatexEnvironmentService::perlDownloadUrl()));
+        return;
+    }
+
+    m_currentBuildIsPreview = false;
+    statusBar()->showMessage(QStringLiteral("Live preview skipped: no usable LaTeX compiler was found"), 7000);
 }
 
 void MainWindow::loadPdf(const QString &pdfPath)
@@ -567,15 +730,32 @@ void MainWindow::loadPdf(const QString &pdfPath)
         return;
     }
 #ifdef LATEXAPP_HAS_QTPDF
+    int currentPage = 0;
+    QPointF currentLocation;
+    if (m_pdfView && m_pdfView->pageNavigator()) {
+        currentPage = m_pdfView->pageNavigator()->currentPage();
+        currentLocation = m_pdfView->pageNavigator()->currentLocation();
+    }
+
     m_pdfDocument.close();
     const auto result = m_pdfDocument.load(pdfPath);
     if (result == QPdfDocument::Error::None) {
+        if (m_pdfView && m_pdfView->pageNavigator()) {
+            const auto targetPage = qBound(0, currentPage, qMax(0, m_pdfDocument.pageCount() - 1));
+            m_pdfView->pageNavigator()->jump(targetPage, currentLocation);
+        }
+        if (m_currentBuildIsPreview && m_pendingPreviewBuildRoot) {
+            m_previewBuildRoot = std::move(m_pendingPreviewBuildRoot);
+        }
         statusBar()->showMessage(QStringLiteral("Loaded PDF: %1").arg(QDir::toNativeSeparators(pdfPath)), 5000);
     }
 #else
     if (m_pdfPlaceholder) {
         m_pdfPlaceholder->setText(QStringLiteral("PDF compiled successfully:\n%1\n\nUse Project > Open Compiled PDF to view it.")
             .arg(QDir::toNativeSeparators(pdfPath)));
+    }
+    if (m_currentBuildIsPreview && m_pendingPreviewBuildRoot) {
+        m_previewBuildRoot = std::move(m_pendingPreviewBuildRoot);
     }
     statusBar()->showMessage(QStringLiteral("PDF ready: %1").arg(QDir::toNativeSeparators(pdfPath)), 5000);
 #endif
@@ -681,6 +861,54 @@ bool MainWindow::copyDirectoryRecursively(const QString &sourcePath, const QStri
     return true;
 }
 
+bool MainWindow::copyDirectoryForPreview(const QString &sourcePath, const QString &destinationPath, const QString &sourceRoot, const QString &outputDirectory, QString *errorMessage) const
+{
+    QDir source(sourcePath);
+    if (!source.exists()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Source folder does not exist.");
+        }
+        return false;
+    }
+
+    QDir destination(destinationPath);
+    if (!destination.exists() && !destination.mkpath(QStringLiteral("."))) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Could not create preview folder.");
+        }
+        return false;
+    }
+
+    const QDir rootDirectory(sourceRoot);
+    const auto normalizedOutputDirectory = QDir::cleanPath(outputDirectory);
+    const auto entries = source.entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries);
+    for (const auto &entry : entries) {
+        const auto relativePath = QDir::cleanPath(rootDirectory.relativeFilePath(entry.absoluteFilePath()));
+        if (!normalizedOutputDirectory.isEmpty()
+            && normalizedOutputDirectory != QStringLiteral(".")
+            && (relativePath == normalizedOutputDirectory || relativePath.startsWith(normalizedOutputDirectory + QLatin1Char('/')))) {
+            continue;
+        }
+
+        const auto targetPath = destination.filePath(entry.fileName());
+        if (entry.isDir()) {
+            if (!copyDirectoryForPreview(entry.absoluteFilePath(), targetPath, sourceRoot, outputDirectory, errorMessage)) {
+                return false;
+            }
+        } else {
+            QFile::remove(targetPath);
+            if (!QFile::copy(entry.absoluteFilePath(), targetPath)) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral("Could not copy %1 into the preview folder.").arg(entry.fileName());
+                }
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 void MainWindow::newProject()
 {
     TemplateService templates;
@@ -771,6 +999,9 @@ void MainWindow::saveCurrentFileAs()
 
 void MainWindow::compileProject()
 {
+    m_autoCompileTimer.stop();
+    m_livePreviewQueued = false;
+    m_currentBuildIsPreview = false;
     const auto buildRoot = activeBuildRoot();
     const auto buildConfig = activeBuildConfig();
 
@@ -918,7 +1149,9 @@ void MainWindow::onBuildStarted()
 {
     m_buildOutput->clear();
     m_diagnosticsModel.clear();
-    statusBar()->showMessage(QStringLiteral("Compiling..."));
+    statusBar()->showMessage(m_currentBuildIsPreview
+        ? QStringLiteral("Compiling live preview...")
+        : QStringLiteral("Compiling..."));
 }
 
 void MainWindow::onBuildOutput(const QString &text)
@@ -930,11 +1163,20 @@ void MainWindow::onBuildOutput(const QString &text)
 
 void MainWindow::onBuildFinished(bool success, const QString &pdfPath, QVector<Diagnostic> diagnostics)
 {
-    m_diagnosticsModel.setDiagnostics(std::move(diagnostics));
+    const auto wasPreview = m_currentBuildIsPreview;
+    const auto runQueuedPreview = wasPreview && m_livePreviewQueued && m_liveCompileEnabled && !activeBuildRoot().isEmpty();
+    m_diagnosticsModel.setDiagnostics(mapPreviewDiagnostics(std::move(diagnostics)));
     if (success) {
         loadPdf(pdfPath);
-        statusBar()->showMessage(QStringLiteral("Build finished"), 5000);
+        statusBar()->showMessage(wasPreview ? QStringLiteral("Live preview updated") : QStringLiteral("Build finished"), 5000);
     } else {
-        statusBar()->showMessage(QStringLiteral("Build failed"), 5000);
+        if (wasPreview) {
+            m_pendingPreviewBuildRoot.reset();
+        }
+        statusBar()->showMessage(wasPreview ? QStringLiteral("Live preview failed") : QStringLiteral("Build failed"), 5000);
+    }
+    m_currentBuildIsPreview = false;
+    if (runQueuedPreview) {
+        m_autoCompileTimer.start();
     }
 }

@@ -12,6 +12,8 @@
 #include <QPointer>
 #include <QTimer>
 
+#include <memory>
+
 #ifdef LATEXAPP_HAS_QTPDF
 #include <QtPdf/QPdfDocument>
 #endif
@@ -24,6 +26,7 @@ class QSplitter;
 class QStackedWidget;
 class QTableView;
 class QTabWidget;
+class QTemporaryDir;
 class QTreeView;
 class QWidget;
 class QAction;
@@ -33,6 +36,7 @@ class MainWindow final : public QMainWindow {
 
 public:
     explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow() override;
     void openStartupPath(const QString &path);
 
 protected:
@@ -52,11 +56,15 @@ private:
     void createStandaloneDocument(const QString &templateName);
     QString activeBuildRoot() const;
     ProjectConfig activeBuildConfig() const;
+    bool preparePreviewSnapshot(QString *previewRoot, ProjectConfig *previewConfig, QString *errorMessage);
+    bool writeOpenEditorsToPreview(const QString &sourceRoot, const QString &previewRoot, QString *errorMessage) const;
+    QVector<Diagnostic> mapPreviewDiagnostics(QVector<Diagnostic> diagnostics) const;
     LatexEditor *currentEditor() const;
     LatexEditor *openFileInEditor(const QString &filePath, int line = 0);
     bool saveEditor(LatexEditor *editor);
     bool saveAll();
     void scheduleAutoCompile();
+    void compileLivePreview();
     void loadPdf(const QString &pdfPath);
     QString currentPdfPath() const;
     void setProjectRootInTree(const QString &projectRoot);
@@ -64,6 +72,7 @@ private:
     void refreshRecentProjectsMenu();
     QStringList recentProjects() const;
     bool copyDirectoryRecursively(const QString &sourcePath, const QString &destinationPath, QString *errorMessage) const;
+    bool copyDirectoryForPreview(const QString &sourcePath, const QString &destinationPath, const QString &sourceRoot, const QString &outputDirectory, QString *errorMessage) const;
 
 private slots:
     void newProject();
@@ -109,5 +118,12 @@ private:
     QAction *m_autoCompileAction = nullptr;
     QTimer m_autoCompileTimer;
     QHash<QString, QPointer<LatexEditor>> m_openEditors;
+    std::unique_ptr<QTemporaryDir> m_previewBuildRoot;
+    std::unique_ptr<QTemporaryDir> m_pendingPreviewBuildRoot;
+    QString m_previewSourceRoot;
+    QString m_previewMirrorRoot;
     QString m_standaloneFilePath;
+    bool m_liveCompileEnabled = true;
+    bool m_currentBuildIsPreview = false;
+    bool m_livePreviewQueued = false;
 };
