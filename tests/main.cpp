@@ -40,6 +40,7 @@ private slots:
 
         const auto arguments = BuildManager::latexmkArguments(config);
         QVERIFY(arguments.contains(QStringLiteral("-pdf")));
+        QVERIFY(arguments.contains(QStringLiteral("-g")));
         QVERIFY(arguments.contains(QStringLiteral("-file-line-error")));
         QVERIFY(arguments.contains(QStringLiteral("-synctex=1")));
         QVERIFY(arguments.contains(QStringLiteral("-outdir=build")));
@@ -85,6 +86,16 @@ private slots:
         QVERIFY(diagnostics.at(0).message.contains(QStringLiteral("Perl")));
     }
 
+    void parseStaleLatexmkStateDiagnostic()
+    {
+        const auto log = QStringLiteral("pdflatex: gave an error in previous invocation of latexmk.\n");
+        const auto diagnostics = BuildManager::parseDiagnostics(log, QStringLiteral("C:/work/paper"));
+
+        QCOMPARE(diagnostics.size(), 1);
+        QVERIFY(diagnostics.at(0).severity == DiagnosticSeverity::Warning);
+        QVERIFY(diagnostics.at(0).message.contains(QStringLiteral("stale build state")));
+    }
+
     void createsTemplateProject()
     {
         QTemporaryDir directory;
@@ -101,8 +112,10 @@ private slots:
     {
         TemplateService service;
         const auto names = service.templateNames();
+        QVERIFY(names.contains(QStringLiteral("Blank")));
         QVERIFY(names.contains(QStringLiteral("Article")));
         QVERIFY(names.contains(QStringLiteral("Beamer")));
+        QVERIFY(service.contentForTemplate(QStringLiteral("Blank")).contains(QStringLiteral("\\begin{document}")));
         QVERIFY(service.contentForTemplate(QStringLiteral("Article")).contains(QStringLiteral("\\documentclass{article}")));
     }
 

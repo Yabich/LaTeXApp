@@ -12,7 +12,10 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
+#include <QGridLayout>
 #include <QHeaderView>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
 #include <QMenu>
@@ -20,9 +23,12 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QPushButton>
 #include <QSettings>
+#include <QSizePolicy>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTableView>
@@ -30,6 +36,7 @@
 #include <QToolBar>
 #include <QTreeView>
 #include <QUrl>
+#include <QVBoxLayout>
 
 #ifdef LATEXAPP_HAS_QTPDF
 #include <QtPdfWidgets/QPdfView>
@@ -57,6 +64,7 @@ MainWindow::MainWindow(QWidget *parent)
         updateWindowTitle();
         addRecentProject(projectRoot);
         openFileInEditor(m_projectService.mainFilePath());
+        showWorkspacePage();
     });
 
     createActions();
@@ -139,6 +147,122 @@ void MainWindow::createActions()
 
 void MainWindow::createCentralUi()
 {
+    m_centralStack = new QStackedWidget(this);
+    m_landingPage = createLandingPage();
+    m_workspacePage = createWorkspacePage();
+
+    m_centralStack->addWidget(m_landingPage);
+    m_centralStack->addWidget(m_workspacePage);
+    setCentralWidget(m_centralStack);
+    showLandingPage();
+}
+
+QWidget *MainWindow::createLandingPage()
+{
+    auto *page = new QWidget(this);
+    page->setObjectName(QStringLiteral("LandingPage"));
+    page->setStyleSheet(QStringLiteral(
+        "QWidget#LandingPage { background: #f6f7f9; }"
+        "QLabel#LandingTitle { color: #111827; font-size: 34px; font-weight: 700; }"
+        "QLabel#LandingSubtitle { color: #4b5563; font-size: 14px; }"
+        "QFrame#LandingPanel { background: #ffffff; border: 1px solid #d8dee8; border-radius: 8px; }"
+        "QLabel#PanelTitle { color: #111827; font-size: 17px; font-weight: 600; }"
+        "QLabel#PanelText { color: #4b5563; font-size: 12px; }"
+        "QPushButton { background: #ffffff; color: #111827; border: 1px solid #cfd6e2; border-radius: 6px; padding: 10px 14px; text-align: left; }"
+        "QPushButton:hover { background: #f1f5f9; border-color: #9aa8bb; }"
+        "QPushButton:pressed { background: #e8eef6; }"
+        "QPushButton#PrimaryButton { background: #1f2937; color: #ffffff; border-color: #1f2937; font-weight: 600; }"
+        "QPushButton#PrimaryButton:hover { background: #111827; }"
+    ));
+
+    auto *outerLayout = new QVBoxLayout(page);
+    outerLayout->setContentsMargins(72, 56, 72, 56);
+    outerLayout->setSpacing(28);
+
+    auto *title = new QLabel(QStringLiteral("LaTeXApp"), page);
+    title->setObjectName(QStringLiteral("LandingTitle"));
+    auto *subtitle = new QLabel(QStringLiteral("Create a new LaTeX document, open a single file, or continue from a project folder."), page);
+    subtitle->setObjectName(QStringLiteral("LandingSubtitle"));
+    subtitle->setWordWrap(true);
+
+    outerLayout->addWidget(title);
+    outerLayout->addWidget(subtitle);
+
+    auto *contentLayout = new QHBoxLayout();
+    contentLayout->setSpacing(24);
+    outerLayout->addLayout(contentLayout, 1);
+
+    auto *quickPanel = new QFrame(page);
+    quickPanel->setObjectName(QStringLiteral("LandingPanel"));
+    quickPanel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    auto *quickLayout = new QVBoxLayout(quickPanel);
+    quickLayout->setContentsMargins(24, 22, 24, 24);
+    quickLayout->setSpacing(12);
+
+    auto *quickTitle = new QLabel(QStringLiteral("Start"), quickPanel);
+    quickTitle->setObjectName(QStringLiteral("PanelTitle"));
+    auto *quickText = new QLabel(QStringLiteral("Open existing work or create a fresh file."), quickPanel);
+    quickText->setObjectName(QStringLiteral("PanelText"));
+    quickText->setWordWrap(true);
+    quickLayout->addWidget(quickTitle);
+    quickLayout->addWidget(quickText);
+
+    auto *openFileButton = new QPushButton(QStringLiteral("Open File..."), quickPanel);
+    openFileButton->setObjectName(QStringLiteral("PrimaryButton"));
+    connect(openFileButton, &QPushButton::clicked, this, &MainWindow::openFile);
+    quickLayout->addWidget(openFileButton);
+
+    auto *openProjectButton = new QPushButton(QStringLiteral("Open Folder..."), quickPanel);
+    connect(openProjectButton, &QPushButton::clicked, this, &MainWindow::openProject);
+    quickLayout->addWidget(openProjectButton);
+
+    auto *blankButton = new QPushButton(QStringLiteral("Create Blank Document..."), quickPanel);
+    connect(blankButton, &QPushButton::clicked, this, &MainWindow::newBlankDocument);
+    quickLayout->addWidget(blankButton);
+
+    auto *projectButton = new QPushButton(QStringLiteral("Create Project From Template..."), quickPanel);
+    connect(projectButton, &QPushButton::clicked, this, &MainWindow::newProject);
+    quickLayout->addWidget(projectButton);
+    quickLayout->addStretch(1);
+    contentLayout->addWidget(quickPanel, 1);
+
+    auto *templatePanel = new QFrame(page);
+    templatePanel->setObjectName(QStringLiteral("LandingPanel"));
+    templatePanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    auto *templateLayout = new QVBoxLayout(templatePanel);
+    templateLayout->setContentsMargins(24, 22, 24, 24);
+    templateLayout->setSpacing(12);
+
+    auto *templateTitle = new QLabel(QStringLiteral("New Document From Template"), templatePanel);
+    templateTitle->setObjectName(QStringLiteral("PanelTitle"));
+    auto *templateText = new QLabel(QStringLiteral("Choose a starter file, save it anywhere, and begin editing immediately."), templatePanel);
+    templateText->setObjectName(QStringLiteral("PanelText"));
+    templateText->setWordWrap(true);
+    templateLayout->addWidget(templateTitle);
+    templateLayout->addWidget(templateText);
+
+    auto *templateGrid = new QGridLayout();
+    templateGrid->setHorizontalSpacing(12);
+    templateGrid->setVerticalSpacing(12);
+    TemplateService templates;
+    const auto names = templates.templateNames();
+    for (int i = 0; i < names.size(); ++i) {
+        const auto name = names.at(i);
+        auto *button = new QPushButton(name, templatePanel);
+        button->setMinimumHeight(52);
+        connect(button, &QPushButton::clicked, this, [this, name]() { createStandaloneDocument(name); });
+        templateGrid->addWidget(button, i / 2, i % 2);
+    }
+    templateLayout->addLayout(templateGrid);
+    templateLayout->addStretch(1);
+    contentLayout->addWidget(templatePanel, 2);
+
+    outerLayout->addStretch(1);
+    return page;
+}
+
+QWidget *MainWindow::createWorkspacePage()
+{
     m_projectTree = new QTreeView(this);
     m_projectTree->setHeaderHidden(true);
     m_fileSystemModel.setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
@@ -204,7 +328,7 @@ void MainWindow::createCentralUi()
     mainSplitter->setStretchFactor(1, 4);
     mainSplitter->setStretchFactor(2, 3);
 
-    setCentralWidget(mainSplitter);
+    return mainSplitter;
 }
 
 void MainWindow::createStatusBar()
@@ -224,6 +348,32 @@ void MainWindow::updateWindowTitle()
     setWindowTitle(root.isEmpty()
         ? QStringLiteral("LaTeXApp")
         : QStringLiteral("%1 - LaTeXApp").arg(QFileInfo(root).fileName()));
+}
+
+void MainWindow::showLandingPage()
+{
+    menuBar()->hide();
+    const auto toolbars = findChildren<QToolBar *>();
+    for (auto *toolbar : toolbars) {
+        toolbar->hide();
+    }
+
+    if (m_centralStack && m_landingPage) {
+        m_centralStack->setCurrentWidget(m_landingPage);
+    }
+}
+
+void MainWindow::showWorkspacePage()
+{
+    menuBar()->show();
+    const auto toolbars = findChildren<QToolBar *>();
+    for (auto *toolbar : toolbars) {
+        toolbar->show();
+    }
+
+    if (m_centralStack && m_workspacePage) {
+        m_centralStack->setCurrentWidget(m_workspacePage);
+    }
 }
 
 void MainWindow::openProjectPath(const QString &path)
@@ -265,7 +415,37 @@ void MainWindow::openStandaloneFilePath(const QString &path)
         m_autoCompileAction->setChecked(false);
     }
     updateWindowTitle();
+    showWorkspacePage();
     statusBar()->showMessage(QStringLiteral("Opened standalone file"), 3000);
+}
+
+void MainWindow::createStandaloneDocument(const QString &templateName)
+{
+    const auto suggestedName = templateName == QStringLiteral("Blank")
+        ? QStringLiteral("untitled.tex")
+        : QStringLiteral("%1.tex").arg(templateName.toLower());
+    const auto path = QFileDialog::getSaveFileName(this,
+        QStringLiteral("Create LaTeX Document"),
+        QDir::home().filePath(suggestedName),
+        QStringLiteral("TeX files (*.tex);;All files (*.*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+
+    if (!saveAll()) {
+        return;
+    }
+
+    TemplateService templates;
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, QStringLiteral("Create Document Failed"), file.errorString());
+        return;
+    }
+    file.write(templates.contentForTemplate(templateName).toUtf8());
+    file.close();
+
+    openStandaloneFilePath(path);
 }
 
 QString MainWindow::activeBuildRoot() const
@@ -533,6 +713,11 @@ void MainWindow::newProject()
         QMessageBox::warning(this, QStringLiteral("Project Creation Failed"), error);
         return;
     }
+}
+
+void MainWindow::newBlankDocument()
+{
+    createStandaloneDocument(QStringLiteral("Blank"));
 }
 
 void MainWindow::openFile()

@@ -6,6 +6,13 @@ namespace {
 QMap<QString, QString> templates()
 {
     return {
+        {QStringLiteral("Blank"), QStringLiteral(R"(\documentclass{article}
+
+\begin{document}
+
+
+\end{document}
+)")},
         {QStringLiteral("Article"), QStringLiteral(R"(\documentclass{article}
 
 \usepackage[utf8]{inputenc}
@@ -128,7 +135,14 @@ Write your letter here.
 
 QStringList TemplateService::templateNames() const
 {
-    return templates().keys();
+    return {
+        QStringLiteral("Blank"),
+        QStringLiteral("Article"),
+        QStringLiteral("Report"),
+        QStringLiteral("Thesis"),
+        QStringLiteral("Beamer"),
+        QStringLiteral("Letter"),
+    };
 }
 
 QString TemplateService::contentForTemplate(const QString &templateName) const
@@ -136,4 +150,3 @@ QString TemplateService::contentForTemplate(const QString &templateName) const
     const auto allTemplates = templates();
     return allTemplates.value(templateName, allTemplates.value(QStringLiteral("Article")));
 }
-

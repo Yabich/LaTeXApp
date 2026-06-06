@@ -19,7 +19,7 @@ LaTeXApp is a Windows-only desktop LaTeX editor MVP written primarily in C++ wit
 ## Build Requirements
 
 - Windows 10 or newer.
-- Visual Studio 2022 Build Tools with MSVC, or MSYS2 UCRT64 with MinGW.
+- Visual Studio 2022 Build Tools with MSVC
 - CMake 3.26 or newer.
 - Qt 6.6 or newer with `Widgets`, `Pdf`, and `PdfWidgets`.
 - Optional for compiling documents: MiKTeX, TeX Live, or TinyTeX with `latexmk`.

@@ -86,6 +86,15 @@ QVector<Diagnostic> BuildManager::parseDiagnostics(const QString &log, const QSt
             continue;
         }
 
+        if (line.contains(QStringLiteral("gave an error in previous invocation of latexmk"), Qt::CaseInsensitive)
+            || line.contains(QStringLiteral("clean out generated files"), Qt::CaseInsensitive)) {
+            Diagnostic diagnostic;
+            diagnostic.severity = DiagnosticSeverity::Warning;
+            diagnostic.message = QStringLiteral("latexmk is reporting stale build state from an earlier failed run. Clean generated files if this persists.");
+            diagnostics.append(diagnostic);
+            continue;
+        }
+
         const auto errorMatch = fileLineError.match(line);
         if (errorMatch.hasMatch()) {
             Diagnostic diagnostic;
@@ -127,6 +136,7 @@ QStringList BuildManager::latexmkArguments(const ProjectConfig &config)
 {
     QStringList arguments = {
         QStringLiteral("-pdf"),
+        QStringLiteral("-g"),
         QStringLiteral("-interaction=nonstopmode"),
         QStringLiteral("-file-line-error"),
         QStringLiteral("-outdir=%1").arg(config.outputDirectory),

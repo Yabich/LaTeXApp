@@ -19,10 +19,13 @@
 class QPdfView;
 class QLabel;
 class QPlainTextEdit;
+class QPushButton;
 class QSplitter;
+class QStackedWidget;
 class QTableView;
 class QTabWidget;
 class QTreeView;
+class QWidget;
 class QAction;
 
 class MainWindow final : public QMainWindow {
@@ -38,10 +41,15 @@ protected:
 private:
     void createActions();
     void createCentralUi();
+    QWidget *createLandingPage();
+    QWidget *createWorkspacePage();
     void createStatusBar();
     void updateWindowTitle();
+    void showLandingPage();
+    void showWorkspacePage();
     void openProjectPath(const QString &path);
     void openStandaloneFilePath(const QString &path);
+    void createStandaloneDocument(const QString &templateName);
     QString activeBuildRoot() const;
     ProjectConfig activeBuildConfig() const;
     LatexEditor *currentEditor() const;
@@ -59,6 +67,7 @@ private:
 
 private slots:
     void newProject();
+    void newBlankDocument();
     void openFile();
     void openProject();
     void saveCurrentFile();
@@ -84,6 +93,9 @@ private:
     QPdfDocument m_pdfDocument;
 #endif
 
+    QStackedWidget *m_centralStack = nullptr;
+    QWidget *m_landingPage = nullptr;
+    QWidget *m_workspacePage = nullptr;
     QTreeView *m_projectTree = nullptr;
     QTabWidget *m_editorTabs = nullptr;
 #ifdef LATEXAPP_HAS_QTPDF

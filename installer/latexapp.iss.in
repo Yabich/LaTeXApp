@@ -1,0 +1,44 @@
+; Inno Setup script generated from CMake.
+
+#define MyAppName "LaTeXApp"
+#define MyAppVersion "@PROJECT_VERSION@"
+#define MyAppPublisher "LaTeXApp"
+#define MyAppExeName "LaTeXApp.exe"
+
+[Setup]
+AppId={{B4AA7642-5C1F-4F4F-9C11-B8568E7E0C9F}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+DefaultDirName={autopf}\{#MyAppName}
+DefaultGroupName={#MyAppName}
+DisableProgramGroupPage=yes
+OutputDir=@CMAKE_BINARY_DIR@\installer
+OutputBaseFilename=LaTeXAppSetup
+Compression=lzma
+SolidCompression=yes
+WizardStyle=modern
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
+
+[Files]
+Source: "@CMAKE_BINARY_DIR@\LaTeXApp.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "@CMAKE_SOURCE_DIR@\templates\*"; DestDir: "{app}\templates"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\.tex"; ValueType: string; ValueName: ""; ValueData: "LaTeXApp.tex"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\LaTeXApp.tex"; ValueType: string; ValueName: ""; ValueData: "LaTeX source file"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\LaTeXApp.tex\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
