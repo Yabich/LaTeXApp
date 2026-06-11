@@ -20,6 +20,9 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog commandline
+UsePreviousPrivileges=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -28,8 +31,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "@CMAKE_BINARY_DIR@\LaTeXApp.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "@CMAKE_SOURCE_DIR@\templates\*"; DestDir: "{app}\templates"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "@CMAKE_BINARY_DIR@\package\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -42,3 +44,391 @@ Root: HKCU; Subkey: "Software\Classes\LaTeXApp.tex\shell\open\command"; ValueTyp
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+const
+  MikTeXInstallerUrl = 'https://miktex.org/download/win/basic-miktex-x64.exe';
+  StrawberryPerlInstallerUrl = 'https://sourceforge.net/projects/perl-dist-strawberry.mirror/files/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit.msi/download';
+
+var
+  ToolchainPage: TWizardPage;
+  ToolchainStatusLabel: TNewStaticText;
+  InstallMiKTeXCheckBox: TNewCheckBox;
+  InstallPerlCheckBox: TNewCheckBox;
+  InitialTexDetected: Boolean;
+  InitialPerlDetected: Boolean;
+
+function PsQuote(Value: String): String;
+begin
+  StringChangeEx(Value, '''', '''''', True);
+  Result := '''' + Value + '''';
+end;
+
+function YesNo(Value: Boolean): String;
+begin
+  if Value then
+  begin
+    Result := 'Yes';
+  end
+    else
+  begin
+    Result := 'No';
+  end;
+end;
+
+function FileExistsInPath(FileName: String): Boolean;
+begin
+  Result := FileSearch(FileName, GetEnv('PATH')) <> '';
+end;
+
+function IsMiKTeXPathUsable(Root: String): Boolean;
+begin
+  Result :=
+    FileExists(AddBackslash(Root) + 'miktex\bin\x64\pdflatex.exe') or
+    FileExists(AddBackslash(Root) + 'miktex\bin\x64\latexmk.exe') or
+    FileExists(AddBackslash(Root) + 'bin\x64\pdflatex.exe') or
+    FileExists(AddBackslash(Root) + 'bin\x64\latexmk.exe');
+end;
+
+function RegistryMiKTeXDetectedIn(RootKey: Integer; Subkey: String): Boolean;
+var
+  InstallRoot: String;
+  InstallLocation: String;
+begin
+  Result := False;
+  if RegQueryStringValue(RootKey, Subkey, 'InstallRoot', InstallRoot) and IsMiKTeXPathUsable(InstallRoot) then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  if RegQueryStringValue(RootKey, Subkey, 'InstallLocation', InstallLocation) and IsMiKTeXPathUsable(InstallLocation) then
+  begin
+    Result := True;
+  end;
+end;
+
+function TeXToolchainDetected(): Boolean;
+begin
+  Result :=
+    FileExistsInPath('latexmk.exe') or
+    FileExistsInPath('pdflatex.exe') or
+    FileExistsInPath('xelatex.exe') or
+    FileExistsInPath('lualatex.exe') or
+    FileExists(ExpandConstant('{commonpf}\MiKTeX\miktex\bin\x64\pdflatex.exe')) or
+    FileExists(ExpandConstant('{commonpf}\MiKTeX\miktex\bin\x64\latexmk.exe')) or
+    FileExists(ExpandConstant('{localappdata}\Programs\MiKTeX\miktex\bin\x64\pdflatex.exe')) or
+    FileExists(ExpandConstant('{localappdata}\Programs\MiKTeX\miktex\bin\x64\latexmk.exe')) or
+    FileExists(ExpandConstant('{userappdata}\TinyTeX\bin\windows\pdflatex.exe')) or
+    FileExists('C:\texlive\2026\bin\windows\pdflatex.exe') or
+    FileExists('C:\texlive\2025\bin\windows\pdflatex.exe') or
+    RegistryMiKTeXDetectedIn(HKLM, 'SOFTWARE\MiKTeX.org\MiKTeX') or
+    RegistryMiKTeXDetectedIn(HKCU, 'SOFTWARE\MiKTeX.org\MiKTeX') or
+    RegistryMiKTeXDetectedIn(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MiKTeX') or
+    RegistryMiKTeXDetectedIn(HKCU, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MiKTeX');
+end;
+
+function PerlDetected(): Boolean;
+begin
+  Result :=
+    FileExistsInPath('perl.exe') or
+    FileExists('C:\Strawberry\perl\bin\perl.exe') or
+    FileExists('C:\Perl64\bin\perl.exe') or
+    FileExists(ExpandConstant('{commonpf}\Git\usr\bin\perl.exe')) or
+    FileExists(ExpandConstant('{userpf}\Git\usr\bin\perl.exe'));
+end;
+
+function DownloadFileWithPowerShell(Url: String; TargetPath: String; DisplayName: String): Boolean;
+var
+  ScriptPath: String;
+  Script: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  ScriptPath := ExpandConstant('{tmp}\latexapp-download.ps1');
+  Script :=
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12' + #13#10 +
+    'Write-Host ''Downloading ' + DisplayName + '...''' + #13#10 +
+    'Invoke-WebRequest -Uri ' + PsQuote(Url) + ' -OutFile ' + PsQuote(TargetPath) + #13#10;
+
+  if not SaveStringToFile(ScriptPath, Script, False) then
+  begin
+    MsgBox('Could not prepare the download helper script.', mbError, MB_OK);
+    Exit;
+  end;
+
+  if Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '"', '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := (ResultCode = 0) and FileExists(TargetPath);
+  end;
+end;
+
+function InstallMiKTeX(InstallerPath: String; var NeedsRestart: Boolean): Boolean;
+var
+  ResultCode: Integer;
+  Params: String;
+begin
+  if IsAdminInstallMode() then
+  begin
+    Params :=
+      '--unattended --package-set=basic --shared ' +
+      '--common-install="' + ExpandConstant('{commonpf}\MiKTeX') + '" ' +
+      '--common-config="' + ExpandConstant('{commonappdata}\MiKTeX') + '" ' +
+      '--common-data="' + ExpandConstant('{commonappdata}\MiKTeX') + '"';
+  end
+    else
+  begin
+    Params :=
+      '--unattended --package-set=basic --private ' +
+      '--user-install="' + ExpandConstant('{localappdata}\Programs\MiKTeX') + '" ' +
+      '--user-config="' + ExpandConstant('{userappdata}\MiKTeX') + '" ' +
+      '--user-data="' + ExpandConstant('{localappdata}\MiKTeX') + '"';
+  end;
+
+  Result := False;
+  if Exec(InstallerPath, Params, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := (ResultCode = 0) or (ResultCode = 3010);
+    if ResultCode = 3010 then
+    begin
+      NeedsRestart := True;
+    end;
+  end;
+end;
+
+function InstallStrawberryPerl(InstallerPath: String; var NeedsRestart: Boolean): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  if Exec('msiexec.exe', '/i "' + InstallerPath + '" /passive /norestart', '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := (ResultCode = 0) or (ResultCode = 3010);
+    if ResultCode = 3010 then
+    begin
+      NeedsRestart := True;
+    end;
+  end;
+end;
+
+function ConfirmRetrySkipAbort(MessageText: String): Integer;
+begin
+  Result := MsgBox(MessageText + #13#10#13#10 +
+    'Choose Retry to try again, Ignore to continue without this component, or Abort to stop setup.',
+    mbError, MB_ABORTRETRYIGNORE);
+end;
+
+function RunMiKTeXGuidedInstall(var NeedsRestart: Boolean): String;
+var
+  InstallerPath: String;
+  Choice: Integer;
+begin
+  Result := '';
+  InstallerPath := ExpandConstant('{tmp}\basic-miktex-x64.exe');
+
+  repeat
+    if DownloadFileWithPowerShell(MikTeXInstallerUrl, InstallerPath, 'MiKTeX') then
+    begin
+      Break;
+    end;
+
+    Choice := ConfirmRetrySkipAbort('MiKTeX could not be downloaded. Check your internet connection and try again.');
+    if Choice = IDABORT then
+    begin
+      Result := 'MiKTeX setup was cancelled.';
+      Exit;
+    end;
+    if Choice = IDIGNORE then
+    begin
+      Exit;
+    end;
+  until False;
+
+  repeat
+    if InstallMiKTeX(InstallerPath, NeedsRestart) and TeXToolchainDetected() then
+    begin
+      Exit;
+    end;
+
+    Choice := ConfirmRetrySkipAbort('MiKTeX installation finished without a verified TeX engine.');
+    if Choice = IDABORT then
+    begin
+      Result := 'MiKTeX setup was cancelled.';
+      Exit;
+    end;
+    if Choice = IDIGNORE then
+    begin
+      Exit;
+    end;
+  until False;
+end;
+
+function RunPerlGuidedInstall(var NeedsRestart: Boolean): String;
+var
+  InstallerPath: String;
+  Choice: Integer;
+begin
+  Result := '';
+  InstallerPath := ExpandConstant('{tmp}\strawberry-perl-x64.msi');
+
+  repeat
+    if DownloadFileWithPowerShell(StrawberryPerlInstallerUrl, InstallerPath, 'Strawberry Perl') then
+    begin
+      Break;
+    end;
+
+    Choice := ConfirmRetrySkipAbort('Strawberry Perl could not be downloaded. Check your internet connection and try again.');
+    if Choice = IDABORT then
+    begin
+      Result := 'Strawberry Perl setup was cancelled.';
+      Exit;
+    end;
+    if Choice = IDIGNORE then
+    begin
+      Exit;
+    end;
+  until False;
+
+  repeat
+    if InstallStrawberryPerl(InstallerPath, NeedsRestart) and PerlDetected() then
+    begin
+      Exit;
+    end;
+
+    Choice := ConfirmRetrySkipAbort('Strawberry Perl installation finished without a verified perl.exe.');
+    if Choice = IDABORT then
+    begin
+      Result := 'Strawberry Perl setup was cancelled.';
+      Exit;
+    end;
+    if Choice = IDIGNORE then
+    begin
+      Exit;
+    end;
+  until False;
+end;
+
+procedure InitializeWizard();
+var
+  IntroLabel: TNewStaticText;
+  ModeLabel: TNewStaticText;
+begin
+  InitialTexDetected := TeXToolchainDetected();
+  InitialPerlDetected := PerlDetected();
+
+  ToolchainPage := CreateCustomPage(wpSelectTasks, 'LaTeX toolchain setup',
+    'LaTeXApp can compile documents after a TeX distribution is installed.');
+
+  ToolchainStatusLabel := TNewStaticText.Create(ToolchainPage);
+  ToolchainStatusLabel.Parent := ToolchainPage.Surface;
+  ToolchainStatusLabel.Left := 0;
+  ToolchainStatusLabel.Top := 0;
+  ToolchainStatusLabel.Width := ToolchainPage.SurfaceWidth;
+  ToolchainStatusLabel.Height := ScaleY(48);
+  ToolchainStatusLabel.WordWrap := True;
+
+  IntroLabel := TNewStaticText.Create(ToolchainPage);
+  IntroLabel.Parent := ToolchainPage.Surface;
+  IntroLabel.Left := 0;
+  IntroLabel.Top := ScaleY(56);
+  IntroLabel.Width := ToolchainPage.SurfaceWidth;
+  IntroLabel.Height := ScaleY(48);
+  IntroLabel.WordWrap := True;
+  IntroLabel.Caption :=
+    'MiKTeX is recommended on Windows. Strawberry Perl is recommended because MiKTeX latexmk requires perl.exe for full live compile support.';
+
+  InstallMiKTeXCheckBox := TNewCheckBox.Create(ToolchainPage);
+  InstallMiKTeXCheckBox.Parent := ToolchainPage.Surface;
+  InstallMiKTeXCheckBox.Left := 0;
+  InstallMiKTeXCheckBox.Top := ScaleY(118);
+  InstallMiKTeXCheckBox.Width := ToolchainPage.SurfaceWidth;
+  InstallMiKTeXCheckBox.Height := ScaleY(20);
+  InstallMiKTeXCheckBox.Caption := 'Download and install MiKTeX if no TeX distribution is detected';
+  InstallMiKTeXCheckBox.Checked := not InitialTexDetected;
+  InstallMiKTeXCheckBox.Enabled := not InitialTexDetected;
+
+  InstallPerlCheckBox := TNewCheckBox.Create(ToolchainPage);
+  InstallPerlCheckBox.Parent := ToolchainPage.Surface;
+  InstallPerlCheckBox.Left := 0;
+  InstallPerlCheckBox.Top := ScaleY(146);
+  InstallPerlCheckBox.Width := ToolchainPage.SurfaceWidth;
+  InstallPerlCheckBox.Height := ScaleY(20);
+  InstallPerlCheckBox.Caption := 'Download and install Strawberry Perl if perl.exe is not detected';
+  InstallPerlCheckBox.Checked := not InitialPerlDetected;
+  InstallPerlCheckBox.Enabled := not InitialPerlDetected;
+
+  ModeLabel := TNewStaticText.Create(ToolchainPage);
+  ModeLabel.Parent := ToolchainPage.Surface;
+  ModeLabel.Left := 0;
+  ModeLabel.Top := ScaleY(184);
+  ModeLabel.Width := ToolchainPage.SurfaceWidth;
+  ModeLabel.Height := ScaleY(64);
+  ModeLabel.WordWrap := True;
+
+  if IsAdminInstallMode() then
+  begin
+    ModeLabel.Caption := 'Setup is running in administrator mode. If MiKTeX is installed, it will be installed system-wide under Program Files.';
+  end
+    else
+  begin
+    ModeLabel.Caption := 'Setup is running in current-user mode. If MiKTeX is installed, it will be installed only for this Windows user.';
+  end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = ToolchainPage.ID then
+  begin
+    InitialTexDetected := TeXToolchainDetected();
+    InitialPerlDetected := PerlDetected();
+    ToolchainStatusLabel.Caption :=
+      'Detected TeX distribution: ' + YesNo(InitialTexDetected) + #13#10 +
+      'Detected Perl: ' + YesNo(InitialPerlDetected);
+
+    if InitialTexDetected then
+    begin
+      InstallMiKTeXCheckBox.Checked := False;
+      InstallMiKTeXCheckBox.Enabled := False;
+    end;
+
+    if InitialPerlDetected then
+    begin
+      InstallPerlCheckBox.Checked := False;
+      InstallPerlCheckBox.Enabled := False;
+    end;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+
+  if InstallMiKTeXCheckBox.Checked and not TeXToolchainDetected() then
+  begin
+    Result := RunMiKTeXGuidedInstall(NeedsRestart);
+    if Result <> '' then
+    begin
+      Exit;
+    end;
+  end;
+
+  if InstallPerlCheckBox.Checked and not PerlDetected() then
+  begin
+    Result := RunPerlGuidedInstall(NeedsRestart);
+    if Result <> '' then
+    begin
+      Exit;
+    end;
+  end;
+
+  if not TeXToolchainDetected() then
+  begin
+    MsgBox('LaTeXApp will be installed, but no TeX distribution was verified. You can install MiKTeX later from LaTeXApp Preferences.', mbInformation, MB_OK);
+  end;
+
+  if TeXToolchainDetected() and not PerlDetected() then
+  begin
+    MsgBox('A TeX distribution was verified, but perl.exe was not found. LaTeXApp can fall back to pdflatex, but latexmk live compile works best after installing Strawberry Perl.', mbInformation, MB_OK);
+  end;
+end;

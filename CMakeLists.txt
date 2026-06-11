@@ -39,12 +39,16 @@ set(LATEXAPP_SOURCES
     src/models/DiagnosticsModel.h
     src/models/ProjectConfig.cpp
     src/models/ProjectConfig.h
+    src/models/ProjectTreeModel.cpp
+    src/models/ProjectTreeModel.h
     src/services/BuildManager.cpp
     src/services/BuildManager.h
     src/services/LatexEnvironmentService.cpp
     src/services/LatexEnvironmentService.h
     src/services/ProjectService.cpp
     src/services/ProjectService.h
+    src/services/SyncTexService.cpp
+    src/services/SyncTexService.h
     src/services/TemplateService.cpp
     src/services/TemplateService.h
     src/ui/MainWindow.cpp
@@ -67,6 +71,10 @@ target_link_libraries(latexapp PRIVATE
 
 if(LATEXAPP_HAS_QTPDF)
     target_compile_definitions(latexapp PRIVATE LATEXAPP_HAS_QTPDF=1)
+    target_sources(latexapp PRIVATE
+        src/widgets/PdfPreviewView.cpp
+        src/widgets/PdfPreviewView.h
+    )
     target_link_libraries(latexapp PRIVATE Qt6::Pdf Qt6::PdfWidgets)
 else()
     message(WARNING "Qt PDF modules were not found. Building without embedded PDF preview; users can still open compiled PDFs externally.")
@@ -95,15 +103,19 @@ if(BUILD_TESTING)
         tests/main.cpp
         src/models/Diagnostic.h
         src/models/ProjectConfig.h
+        src/models/ProjectTreeModel.h
         src/services/BuildManager.h
         src/services/LatexEnvironmentService.h
         src/services/ProjectService.h
+        src/services/SyncTexService.h
         src/services/TemplateService.h
         src/models/DiagnosticsModel.cpp
         src/models/ProjectConfig.cpp
+        src/models/ProjectTreeModel.cpp
         src/services/BuildManager.cpp
         src/services/LatexEnvironmentService.cpp
         src/services/ProjectService.cpp
+        src/services/SyncTexService.cpp
         src/services/TemplateService.cpp
     )
     target_include_directories(latexapp_tests PRIVATE src)

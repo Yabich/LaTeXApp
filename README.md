@@ -13,7 +13,7 @@ LaTeXApp is a Windows-only desktop LaTeX editor MVP written primarily in C++ wit
 - PDF preview using `QtPdfWidgets`.
 - Windows TeX detection for MiKTeX, TeX Live, TinyTeX, and tools on `PATH`.
 - Settings dialog for overriding `latexmk`.
-- Inno Setup installer template.
+- Inno Setup installer with guided MiKTeX and Strawberry Perl detection/install.
 - Unit tests for config, templates, diagnostics parsing, and environment detection.
 
 ## Build Requirements
@@ -24,6 +24,18 @@ LaTeXApp is a Windows-only desktop LaTeX editor MVP written primarily in C++ wit
 - Qt 6.6 or newer with `Widgets`, `Pdf`, and `PdfWidgets`.
 - Optional for compiling documents: MiKTeX, TeX Live, or TinyTeX with `latexmk`.
 - Optional for installer: Inno Setup 6.
+
+## End-User Installer Requirements
+
+Users who install LaTeXApp from `LaTeXAppSetup.exe` do not need Visual Studio, CMake, Qt, or Inno Setup.
+
+For document compilation, the installer checks for a TeX distribution and Perl:
+
+- If MiKTeX, TeX Live, TinyTeX, or TeX tools on `PATH` are found, setup continues normally.
+- If no TeX distribution is found, setup offers to download and install MiKTeX.
+- If `perl.exe` is missing, setup offers to download and install Strawberry Perl for full `latexmk` support.
+- If setup is running as administrator, MiKTeX is installed system-wide; otherwise it is installed for the current user.
+- Failed downloads or installs offer Retry, Ignore, or Abort, and setup verifies the tools again after external installers finish.
 
 ## Configure And Build
 
@@ -54,9 +66,19 @@ Run `scripts\deploy.ps1` after building before launching from Explorer. It copie
 .\build\LaTeXApp.exe C:\path\to\project-or-main.tex
 ```
 
-Or use the helper:
+## Create The Windows Installer
 
 ```powershell
-.\scripts\run.ps1
-.\scripts\run.ps1 -Path C:\path\to\project-or-main.tex
+.\scripts\make-installer.ps1 -Config debug
+```
+
+The script creates `build\package`, copies `LaTeXApp.exe`, runs `windeployqt`, copies templates, and compiles `build\installer\latexapp.iss`.
+The resulting installer is written under `build\installer`.
+
+## Run the Windows Installer 
+
+Run the Windows Installer:
+
+```powershell
+.\build\installer\LaTeXAppSetup.exe
 ```

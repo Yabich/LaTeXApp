@@ -26,6 +26,10 @@ public:
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+
+signals:
+    void sourceSyncRequested(const QString &filePath, int line, int column);
 
 private slots:
     void updateLineNumberAreaWidth();
@@ -59,4 +63,3 @@ protected:
 private:
     LatexEditor *m_editor = nullptr;
 };
-

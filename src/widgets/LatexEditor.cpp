@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFontDatabase>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QScrollBar>
 #include <QStringConverter>
@@ -185,6 +186,20 @@ void LatexEditor::keyPressEvent(QKeyEvent *event)
     m_completer->popup()->setCurrentIndex(m_completer->completionModel()->index(0, 0));
     const auto rect = cursorRect();
     m_completer->complete(QRect(rect.left(), rect.bottom(), 360, rect.height()));
+}
+
+void LatexEditor::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && (event->modifiers() & Qt::ControlModifier) && !m_filePath.isEmpty()) {
+        auto cursor = cursorForPosition(event->pos());
+        setTextCursor(cursor);
+        const auto block = cursor.block();
+        emit sourceSyncRequested(m_filePath, block.blockNumber() + 1, cursor.positionInBlock() + 1);
+        event->accept();
+        return;
+    }
+
+    QPlainTextEdit::mousePressEvent(event);
 }
 
 void LatexEditor::updateLineNumberAreaWidth()

@@ -2,6 +2,7 @@
 #include "services/BuildManager.h"
 #include "services/LatexEnvironmentService.h"
 #include "services/ProjectService.h"
+#include "services/SyncTexService.h"
 #include "services/TemplateService.h"
 
 #include <QJsonDocument>
@@ -96,6 +97,28 @@ private slots:
         QVERIFY(diagnostics.at(0).message.contains(QStringLiteral("stale build state")));
     }
 
+    void parseSynctexForwardOutput()
+    {
+        const auto output = QStringLiteral("SyncTeX result begin\nOutput:main.pdf\nPage:2\nx:144.50\ny:233.25\nSyncTeX result end\n");
+        const auto result = SyncTexService::parseForwardOutput(output);
+
+        QVERIFY(result.success);
+        QCOMPARE(result.page, 2);
+        QCOMPARE(result.position.x(), 144.50);
+        QCOMPARE(result.position.y(), 233.25);
+    }
+
+    void parseSynctexInverseOutput()
+    {
+        const auto output = QStringLiteral("SyncTeX result begin\nInput:C:/work/paper/main.tex\nLine:42\nColumn:7\nSyncTeX result end\n");
+        const auto result = SyncTexService::parseInverseOutput(output);
+
+        QVERIFY(result.success);
+        QCOMPARE(result.inputFile, QStringLiteral("C:/work/paper/main.tex"));
+        QCOMPARE(result.line, 42);
+        QCOMPARE(result.column, 7);
+    }
+
     void createsTemplateProject()
     {
         QTemporaryDir directory;
@@ -106,6 +129,26 @@ private slots:
         QVERIFY2(service.createProject(directory.path(), QStringLiteral("Article"), &error), qPrintable(error));
         QVERIFY(QFile::exists(QDir(directory.path()).filePath(QStringLiteral("main.tex"))));
         QVERIFY(QFile::exists(QDir(directory.path()).filePath(QStringLiteral(".latexapp/project.json"))));
+    }
+
+    void projectServiceSavesNestedMainFile()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+
+        ProjectService service;
+        QString error;
+        QVERIFY2(service.createProject(directory.path(), QStringLiteral("Article"), &error), qPrintable(error));
+        QVERIFY(QDir(directory.path()).mkpath(QStringLiteral("chapters")));
+
+        ProjectConfig config = service.config();
+        config.mainFile = QStringLiteral("chapters/intro.tex");
+        service.setConfig(config);
+        QVERIFY2(service.saveConfig(&error), qPrintable(error));
+
+        ProjectService reopened;
+        QVERIFY2(reopened.openPath(directory.path(), &error), qPrintable(error));
+        QCOMPARE(reopened.config().mainFile, QStringLiteral("chapters/intro.tex"));
     }
 
     void templateServiceProvidesExpectedTemplates()

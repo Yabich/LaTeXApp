@@ -3,12 +3,18 @@
 #include "services/TemplateService.h"
 #include "ui/SettingsDialog.h"
 
+#ifdef LATEXAPP_HAS_QTPDF
+#include "widgets/PdfPreviewView.h"
+#endif
+
 #include <QAction>
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QDesktopServices>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -18,6 +24,7 @@
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -25,6 +32,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QSettings>
+#include <QShortcut>
 #include <QSizePolicy>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -68,6 +76,8 @@ MainWindow::MainWindow(QWidget *parent)
         addRecentProject(projectRoot);
         openFileInEditor(m_projectService.mainFilePath());
         showWorkspacePage();
+        compactBuildPanel();
+        QTimer::singleShot(0, this, &MainWindow::scheduleAutoCompile);
     });
 
     createActions();
@@ -104,6 +114,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
 void MainWindow::createActions()
 {
     auto *fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
+    auto *editMenu = menuBar()->addMenu(QStringLiteral("&Edit"));
     auto *projectMenu = menuBar()->addMenu(QStringLiteral("&Project"));
     auto *toolsMenu = menuBar()->addMenu(QStringLiteral("&Tools"));
 
@@ -130,8 +141,12 @@ void MainWindow::createActions()
     auto *exitAction = fileMenu->addAction(QStringLiteral("Exit"));
     connect(exitAction, &QAction::triggered, this, &QWidget::close);
 
+    addAction(editMenu, QStringLiteral("Find"), QKeySequence::Find, &MainWindow::showFindPanel);
+    addAction(editMenu, QStringLiteral("Replace"), QKeySequence(QStringLiteral("Ctrl+H")), &MainWindow::showReplacePanel);
+
     addAction(projectMenu, QStringLiteral("Compile"), QKeySequence(QStringLiteral("Ctrl+R")), &MainWindow::compileProject);
     addAction(projectMenu, QStringLiteral("Open Compiled PDF"), QKeySequence(), &MainWindow::openCompiledPdf);
+    addAction(projectMenu, QStringLiteral("Save PDF As..."), QKeySequence(), &MainWindow::savePdfAs);
     projectMenu->addSeparator();
     addAction(projectMenu, QStringLiteral("Copy Project"), QKeySequence(), &MainWindow::copyProject);
     addAction(projectMenu, QStringLiteral("Export Project ZIP"), QKeySequence(), &MainWindow::exportProjectZip);
@@ -272,7 +287,10 @@ QWidget *MainWindow::createWorkspacePage()
     m_fileSystemModel.setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
     m_fileSystemModel.setNameFilters({QStringLiteral("*.tex"), QStringLiteral("*.bib"), QStringLiteral("*.sty"), QStringLiteral("*.cls"), QStringLiteral("*.png"), QStringLiteral("*.jpg"), QStringLiteral("*.pdf")});
     m_fileSystemModel.setNameFilterDisables(false);
-    m_projectTree->setModel(&m_fileSystemModel);
+    m_projectTreeModel.setSourceModel(&m_fileSystemModel);
+    m_projectTree->setModel(&m_projectTreeModel);
+    m_projectTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_projectTree, &QTreeView::customContextMenuRequested, this, &MainWindow::showProjectTreeContextMenu);
     connect(m_projectTree, &QTreeView::doubleClicked, this, &MainWindow::onTreeActivated);
 
     m_editorTabs = new QTabWidget(this);
@@ -283,17 +301,19 @@ QWidget *MainWindow::createWorkspacePage()
         if (!editor || !saveEditor(editor)) {
             return;
         }
-        m_openEditors.remove(editor->filePath());
+        m_openEditors.remove(QFileInfo(editor->filePath()).canonicalFilePath());
         m_editorTabs->removeTab(index);
         editor->deleteLater();
     });
+    connect(m_editorTabs, &QTabWidget::currentChanged, this, [this]() { updateSearchStatus(); });
 
 #ifdef LATEXAPP_HAS_QTPDF
-    auto *pdfPane = new QPdfView(this);
+    auto *pdfPane = new PdfPreviewView(this);
     m_pdfView = pdfPane;
     m_pdfView->setDocument(&m_pdfDocument);
     m_pdfView->setPageMode(QPdfView::PageMode::MultiPage);
     m_pdfView->setZoomMode(QPdfView::ZoomMode::FitToWidth);
+    connect(pdfPane, &PdfPreviewView::pdfSyncRequested, this, &MainWindow::syncPdfToSource);
 #else
     auto *pdfPane = new QLabel(QStringLiteral("Embedded PDF preview is not available because the Qt PDF module is not installed.\n\nCompile the project, then use Project > Open Compiled PDF."), this);
     m_pdfPlaceholder = pdfPane;
@@ -317,22 +337,101 @@ QWidget *MainWindow::createWorkspacePage()
     auto *bottomTabs = new QTabWidget(this);
     bottomTabs->addTab(m_diagnosticsView, QStringLiteral("Diagnostics"));
     bottomTabs->addTab(m_buildOutput, QStringLiteral("Build Log"));
+    bottomTabs->setMinimumHeight(90);
 
-    auto *editorAndBottom = new QSplitter(Qt::Vertical, this);
-    editorAndBottom->addWidget(m_editorTabs);
-    editorAndBottom->addWidget(bottomTabs);
-    editorAndBottom->setStretchFactor(0, 4);
-    editorAndBottom->setStretchFactor(1, 1);
+    m_searchPanel = createSearchReplacePanel();
+    auto *editorPane = new QWidget(this);
+    auto *editorPaneLayout = new QVBoxLayout(editorPane);
+    editorPaneLayout->setContentsMargins(0, 0, 0, 0);
+    editorPaneLayout->setSpacing(0);
+    editorPaneLayout->addWidget(m_searchPanel);
+    editorPaneLayout->addWidget(m_editorTabs, 1);
+
+    m_editorAndBottomSplitter = new QSplitter(Qt::Vertical, this);
+    m_editorAndBottomSplitter->addWidget(editorPane);
+    m_editorAndBottomSplitter->addWidget(bottomTabs);
+    m_editorAndBottomSplitter->setStretchFactor(0, 8);
+    m_editorAndBottomSplitter->setStretchFactor(1, 1);
+    compactBuildPanel();
 
     auto *mainSplitter = new QSplitter(Qt::Horizontal, this);
     mainSplitter->addWidget(m_projectTree);
-    mainSplitter->addWidget(editorAndBottom);
+    mainSplitter->addWidget(m_editorAndBottomSplitter);
     mainSplitter->addWidget(pdfPane);
     mainSplitter->setStretchFactor(0, 1);
     mainSplitter->setStretchFactor(1, 4);
     mainSplitter->setStretchFactor(2, 3);
 
     return mainSplitter;
+}
+
+QWidget *MainWindow::createSearchReplacePanel()
+{
+    auto *panel = new QWidget(this);
+    panel->setVisible(false);
+    panel->setStyleSheet(QStringLiteral(
+        "QWidget { background: #f8fafc; border-bottom: 1px solid #d8dee8; }"
+        "QLineEdit { background: #ffffff; color: #111827; border: 1px solid #cfd6e2; border-radius: 4px; padding: 5px 7px; }"
+        "QPushButton { background: #ffffff; color: #111827; border: 1px solid #cfd6e2; border-radius: 4px; padding: 5px 9px; }"
+        "QPushButton:hover { background: #eef3f8; }"
+        "QLabel { color: #4b5563; }"
+        "QCheckBox { color: #374151; }"
+    ));
+
+    auto *layout = new QHBoxLayout(panel);
+    layout->setContentsMargins(8, 6, 8, 6);
+    layout->setSpacing(6);
+
+    layout->addWidget(new QLabel(QStringLiteral("Find"), panel));
+    m_searchText = new QLineEdit(panel);
+    m_searchText->setClearButtonEnabled(true);
+    m_searchText->setMinimumWidth(220);
+    layout->addWidget(m_searchText);
+
+    layout->addWidget(new QLabel(QStringLiteral("Replace"), panel));
+    m_replaceText = new QLineEdit(panel);
+    m_replaceText->setClearButtonEnabled(true);
+    m_replaceText->setMinimumWidth(180);
+    layout->addWidget(m_replaceText);
+
+    m_matchCaseCheck = new QCheckBox(QStringLiteral("Match case"), panel);
+    connect(m_matchCaseCheck, &QCheckBox::toggled, this, [this]() { updateSearchStatus(); });
+    layout->addWidget(m_matchCaseCheck);
+
+    auto *previousButton = new QPushButton(QStringLiteral("Previous"), panel);
+    connect(previousButton, &QPushButton::clicked, this, &MainWindow::findPreviousMatch);
+    layout->addWidget(previousButton);
+
+    auto *nextButton = new QPushButton(QStringLiteral("Next"), panel);
+    connect(nextButton, &QPushButton::clicked, this, &MainWindow::findNextMatch);
+    layout->addWidget(nextButton);
+
+    auto *replaceButton = new QPushButton(QStringLiteral("Replace"), panel);
+    connect(replaceButton, &QPushButton::clicked, this, &MainWindow::replaceCurrentMatch);
+    layout->addWidget(replaceButton);
+
+    auto *replaceAllButton = new QPushButton(QStringLiteral("Replace All"), panel);
+    connect(replaceAllButton, &QPushButton::clicked, this, &MainWindow::replaceAllMatches);
+    layout->addWidget(replaceAllButton);
+
+    m_searchStatus = new QLabel(panel);
+    m_searchStatus->setMinimumWidth(96);
+    layout->addWidget(m_searchStatus);
+    layout->addStretch(1);
+
+    auto *closeButton = new QPushButton(QStringLiteral("Close"), panel);
+    connect(closeButton, &QPushButton::clicked, this, &MainWindow::hideSearchReplacePanel);
+    layout->addWidget(closeButton);
+
+    connect(m_searchText, &QLineEdit::returnPressed, this, &MainWindow::findNextMatch);
+    connect(m_searchText, &QLineEdit::textChanged, this, [this]() { updateSearchStatus(); });
+    connect(m_replaceText, &QLineEdit::returnPressed, this, &MainWindow::replaceCurrentMatch);
+
+    auto *escapeShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), panel);
+    escapeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(escapeShortcut, &QShortcut::activated, this, &MainWindow::hideSearchReplacePanel);
+
+    return panel;
 }
 
 void MainWindow::createStatusBar()
@@ -387,6 +486,10 @@ void MainWindow::openProjectPath(const QString &path)
     }
 
     m_standaloneFilePath.clear();
+    m_displayedPdfPath.clear();
+    m_displayedBuildRoot.clear();
+    m_displayedSourceRoot.clear();
+    m_displayedPdfFromPreview = false;
     m_projectTree->setVisible(true);
 
     QString error;
@@ -413,6 +516,10 @@ void MainWindow::openStandaloneFilePath(const QString &path)
     }
 
     m_standaloneFilePath = QFileInfo(editor->filePath()).absoluteFilePath();
+    m_displayedPdfPath.clear();
+    m_displayedBuildRoot.clear();
+    m_displayedSourceRoot.clear();
+    m_displayedPdfFromPreview = false;
     m_projectTree->setVisible(false);
     if (m_autoCompileAction) {
         QSignalBlocker blocker(m_autoCompileAction);
@@ -420,6 +527,8 @@ void MainWindow::openStandaloneFilePath(const QString &path)
     }
     updateWindowTitle();
     showWorkspacePage();
+    compactBuildPanel();
+    QTimer::singleShot(0, this, &MainWindow::scheduleAutoCompile);
     statusBar()->showMessage(QStringLiteral("Opened standalone file"), 3000);
 }
 
@@ -625,6 +734,7 @@ LatexEditor *MainWindow::openFileInEditor(const QString &filePath, int line)
         }
     });
     connect(editor->document(), &QTextDocument::contentsChanged, this, &MainWindow::scheduleAutoCompile);
+    connect(editor, &LatexEditor::sourceSyncRequested, this, &MainWindow::syncSourceToPdf);
 
     m_openEditors.insert(canonicalPath, editor);
     m_editorTabs->addTab(editor, info.fileName());
@@ -669,6 +779,15 @@ bool MainWindow::saveAll()
         }
     }
     return true;
+}
+
+void MainWindow::compactBuildPanel()
+{
+    if (!m_editorAndBottomSplitter) {
+        return;
+    }
+
+    m_editorAndBottomSplitter->setSizes({900, 115});
 }
 
 void MainWindow::scheduleAutoCompile()
@@ -729,6 +848,9 @@ void MainWindow::loadPdf(const QString &pdfPath)
     if (!QFileInfo::exists(pdfPath)) {
         return;
     }
+    const auto loadedPreview = m_currentBuildIsPreview;
+    const auto loadedBuildRoot = loadedPreview ? m_previewMirrorRoot : activeBuildRoot();
+    const auto loadedSourceRoot = loadedPreview ? m_previewSourceRoot : activeBuildRoot();
 #ifdef LATEXAPP_HAS_QTPDF
     int currentPage = 0;
     QPointF currentLocation;
@@ -747,6 +869,10 @@ void MainWindow::loadPdf(const QString &pdfPath)
         if (m_currentBuildIsPreview && m_pendingPreviewBuildRoot) {
             m_previewBuildRoot = std::move(m_pendingPreviewBuildRoot);
         }
+        m_displayedPdfPath = pdfPath;
+        m_displayedBuildRoot = loadedBuildRoot;
+        m_displayedSourceRoot = loadedSourceRoot;
+        m_displayedPdfFromPreview = loadedPreview;
         statusBar()->showMessage(QStringLiteral("Loaded PDF: %1").arg(QDir::toNativeSeparators(pdfPath)), 5000);
     }
 #else
@@ -757,6 +883,10 @@ void MainWindow::loadPdf(const QString &pdfPath)
     if (m_currentBuildIsPreview && m_pendingPreviewBuildRoot) {
         m_previewBuildRoot = std::move(m_pendingPreviewBuildRoot);
     }
+    m_displayedPdfPath = pdfPath;
+    m_displayedBuildRoot = loadedBuildRoot;
+    m_displayedSourceRoot = loadedSourceRoot;
+    m_displayedPdfFromPreview = loadedPreview;
     statusBar()->showMessage(QStringLiteral("PDF ready: %1").arg(QDir::toNativeSeparators(pdfPath)), 5000);
 #endif
 }
@@ -772,11 +902,110 @@ QString MainWindow::currentPdfPath() const
     return QDir(root).filePath(QDir(config.outputDirectory).filePath(mainBaseName + QStringLiteral(".pdf")));
 }
 
+QString MainWindow::displayedPdfPath() const
+{
+    if (!m_displayedPdfPath.isEmpty() && QFileInfo::exists(m_displayedPdfPath)) {
+        return m_displayedPdfPath;
+    }
+    const auto pdfPath = currentPdfPath();
+    return QFileInfo::exists(pdfPath) ? pdfPath : QString();
+}
+
+QString MainWindow::mapSourcePathToDisplayedBuildPath(const QString &sourcePath) const
+{
+    const QFileInfo sourceInfo(sourcePath);
+    const auto canonicalSourcePath = sourceInfo.exists() ? sourceInfo.canonicalFilePath() : sourceInfo.absoluteFilePath();
+    if (!m_displayedPdfFromPreview || m_displayedSourceRoot.isEmpty() || m_displayedBuildRoot.isEmpty()) {
+        return canonicalSourcePath;
+    }
+
+    const QDir sourceRoot(m_displayedSourceRoot);
+    const auto relativePath = sourceRoot.relativeFilePath(canonicalSourcePath);
+    if (relativePath.startsWith(QStringLiteral("..")) || QFileInfo(relativePath).isAbsolute()) {
+        return canonicalSourcePath;
+    }
+
+    return QDir(m_displayedBuildRoot).filePath(relativePath);
+}
+
+QString MainWindow::mapDisplayedBuildPathToSourcePath(const QString &buildPath) const
+{
+    QFileInfo buildInfo(buildPath);
+    const auto absoluteBuildPath = buildInfo.isRelative()
+        ? QDir(m_displayedBuildRoot).filePath(buildPath)
+        : (buildInfo.exists() ? buildInfo.canonicalFilePath() : buildInfo.absoluteFilePath());
+
+    if (!m_displayedPdfFromPreview || m_displayedSourceRoot.isEmpty() || m_displayedBuildRoot.isEmpty()) {
+        return absoluteBuildPath;
+    }
+
+    const QDir buildRoot(m_displayedBuildRoot);
+    const auto relativePath = buildRoot.relativeFilePath(absoluteBuildPath);
+    if (relativePath.startsWith(QStringLiteral("..")) || QFileInfo(relativePath).isAbsolute()) {
+        return absoluteBuildPath;
+    }
+
+    return QDir(m_displayedSourceRoot).filePath(relativePath);
+}
+
+void MainWindow::syncSourceToPdf(const QString &sourcePath, int line, int column)
+{
+#ifdef LATEXAPP_HAS_QTPDF
+    const auto pdfPath = displayedPdfPath();
+    if (pdfPath.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Compile the document before using source/PDF sync."), 5000);
+        return;
+    }
+
+    const auto buildSourcePath = mapSourcePathToDisplayedBuildPath(sourcePath);
+    const auto result = m_syncTexService.forwardSearch(buildSourcePath, line, column, pdfPath);
+    if (!result.success) {
+        statusBar()->showMessage(result.message.isEmpty() ? QStringLiteral("No matching PDF position found.") : result.message, 6000);
+        return;
+    }
+
+    if (m_pdfView && m_pdfView->pageNavigator()) {
+        const auto targetPage = qBound(0, result.page - 1, qMax(0, m_pdfDocument.pageCount() - 1));
+        m_pdfView->pageNavigator()->jump(targetPage, result.position);
+        statusBar()->showMessage(QStringLiteral("Synced source line %1 to PDF").arg(line), 3000);
+    }
+#else
+    Q_UNUSED(sourcePath)
+    Q_UNUSED(line)
+    Q_UNUSED(column)
+    statusBar()->showMessage(QStringLiteral("Embedded PDF preview is not available."), 5000);
+#endif
+}
+
+void MainWindow::syncPdfToSource(int oneBasedPage, const QPointF &pagePoint)
+{
+    const auto pdfPath = displayedPdfPath();
+    if (pdfPath.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Compile the document before using PDF/source sync."), 5000);
+        return;
+    }
+
+    const auto result = m_syncTexService.inverseSearch(pdfPath, oneBasedPage, pagePoint);
+    if (!result.success) {
+        statusBar()->showMessage(result.message.isEmpty() ? QStringLiteral("No matching source position found.") : result.message, 6000);
+        return;
+    }
+
+    const auto sourcePath = mapDisplayedBuildPathToSourcePath(result.inputFile);
+    if (openFileInEditor(sourcePath, result.line)) {
+        statusBar()->showMessage(QStringLiteral("Synced PDF page %1 to source line %2").arg(oneBasedPage).arg(result.line), 3000);
+    } else {
+        statusBar()->showMessage(QStringLiteral("SyncTeX found a source file, but it could not be opened."), 6000);
+    }
+}
+
 void MainWindow::setProjectRootInTree(const QString &projectRoot)
 {
     const auto rootIndex = m_fileSystemModel.setRootPath(projectRoot);
-    m_projectTree->setRootIndex(rootIndex);
-    for (int column = 1; column < m_fileSystemModel.columnCount(); ++column) {
+    const auto config = m_projectService.config();
+    m_projectTreeModel.setProjectMetadata(projectRoot, config.mainFile, config.outputDirectory);
+    m_projectTree->setRootIndex(m_projectTreeModel.mapFromSource(rootIndex));
+    for (int column = 1; column < m_projectTreeModel.columnCount(); ++column) {
         m_projectTree->hideColumn(column);
     }
 }
@@ -820,6 +1049,165 @@ QStringList MainWindow::recentProjects() const
 {
     QSettings settings;
     return settings.value(QStringLiteral("recentProjects")).toStringList();
+}
+
+QString MainWindow::projectTreePathFromIndex(const QModelIndex &index) const
+{
+    if (!index.isValid()) {
+        return {};
+    }
+
+    return m_fileSystemModel.filePath(m_projectTreeModel.mapToSource(index));
+}
+
+QString MainWindow::selectedProjectTreeDirectory(const QModelIndex &index) const
+{
+    const auto path = projectTreePathFromIndex(index);
+    if (path.isEmpty()) {
+        return m_projectService.projectRoot();
+    }
+
+    const QFileInfo info(path);
+    return info.isDir() ? info.absoluteFilePath() : info.absolutePath();
+}
+
+bool MainWindow::isProjectItemPath(const QString &path) const
+{
+    if (path.isEmpty() || m_projectService.projectRoot().isEmpty() || !m_standaloneFilePath.isEmpty()) {
+        return false;
+    }
+
+    const QFileInfo info(path);
+    const QDir root(m_projectService.projectRoot());
+    const auto relativePath = QDir::cleanPath(root.relativeFilePath(info.absoluteFilePath()));
+    return relativePath != QStringLiteral(".")
+        && relativePath != QStringLiteral("..")
+        && !relativePath.startsWith(QStringLiteral("../"))
+        && !QFileInfo(relativePath).isAbsolute();
+}
+
+bool MainWindow::isValidProjectTreeName(const QString &name) const
+{
+    const auto trimmed = name.trimmed();
+    return !trimmed.isEmpty()
+        && trimmed != QStringLiteral(".")
+        && trimmed != QStringLiteral("..")
+        && !trimmed.contains(QLatin1Char('/'))
+        && !trimmed.contains(QLatin1Char('\\'));
+}
+
+void MainWindow::updateMainFileAfterPathChanged(const QString &oldPath, const QString &newPath)
+{
+    if (m_projectService.projectRoot().isEmpty() || !m_standaloneFilePath.isEmpty()) {
+        return;
+    }
+
+    const QDir root(m_projectService.projectRoot());
+    const auto config = m_projectService.config();
+    const auto mainAbsolutePath = QFileInfo(root.filePath(config.mainFile)).absoluteFilePath();
+    const QFileInfo oldInfo(oldPath);
+    const auto oldAbsolutePath = oldInfo.absoluteFilePath();
+    const auto mainIsInsideOldFolder = mainAbsolutePath.startsWith(oldAbsolutePath + QLatin1Char('/'));
+    const auto oldIsFolder = oldInfo.isDir()
+        || mainIsInsideOldFolder
+        || (!newPath.isEmpty() && QFileInfo(newPath).isDir());
+    const auto mainWasAffected = oldIsFolder
+        ? (mainAbsolutePath == oldAbsolutePath || mainIsInsideOldFolder)
+        : mainAbsolutePath == oldAbsolutePath;
+
+    if (!mainWasAffected) {
+        return;
+    }
+
+    auto updatedConfig = config;
+    if (!newPath.isEmpty()) {
+        const QFileInfo newInfo(newPath);
+        if (oldIsFolder) {
+            const auto relativeInsideFolder = QDir(oldAbsolutePath).relativeFilePath(mainAbsolutePath);
+            updatedConfig.mainFile = QDir::cleanPath(root.relativeFilePath(QDir(newInfo.absoluteFilePath()).filePath(relativeInsideFolder)));
+        } else {
+            updatedConfig.mainFile = QDir::cleanPath(root.relativeFilePath(newInfo.absoluteFilePath()));
+        }
+    } else {
+        updatedConfig.mainFile.clear();
+        QDirIterator iterator(m_projectService.projectRoot(), {QStringLiteral("*.tex")}, QDir::Files, QDirIterator::Subdirectories);
+        while (iterator.hasNext()) {
+            const auto candidate = iterator.next();
+            const auto relativeCandidate = QDir::cleanPath(root.relativeFilePath(candidate));
+            if (relativeCandidate.startsWith(QStringLiteral(".latexapp/"))
+                || (!config.outputDirectory.isEmpty() && relativeCandidate.startsWith(QDir::cleanPath(config.outputDirectory) + QLatin1Char('/')))) {
+                continue;
+            }
+            updatedConfig.mainFile = relativeCandidate;
+            break;
+        }
+    }
+
+    QString error;
+    m_projectService.setConfig(updatedConfig);
+    if (!m_projectService.saveConfig(&error)) {
+        QMessageBox::warning(this, QStringLiteral("Project Config"), error);
+    }
+    m_projectTreeModel.setProjectMetadata(m_projectService.projectRoot(), updatedConfig.mainFile, updatedConfig.outputDirectory);
+}
+
+void MainWindow::closeEditorForPath(const QString &path)
+{
+    const QFileInfo targetInfo(path);
+    const auto targetPath = targetInfo.absoluteFilePath();
+    const auto targetIsDir = targetInfo.isDir();
+
+    for (int i = m_editorTabs->count() - 1; i >= 0; --i) {
+        auto *editor = qobject_cast<LatexEditor *>(m_editorTabs->widget(i));
+        if (!editor) {
+            continue;
+        }
+
+        const auto editorPath = QFileInfo(editor->filePath()).absoluteFilePath();
+        const auto affected = targetIsDir
+            ? (editorPath == targetPath || editorPath.startsWith(targetPath + QLatin1Char('/')))
+            : editorPath == targetPath;
+        if (!affected) {
+            continue;
+        }
+
+        m_openEditors.remove(QFileInfo(editor->filePath()).canonicalFilePath());
+        m_editorTabs->removeTab(i);
+        editor->deleteLater();
+    }
+}
+
+void MainWindow::rekeyOpenEditor(const QString &oldPath, const QString &newPath)
+{
+    const QFileInfo oldInfo(oldPath);
+    const auto oldCanonical = oldInfo.canonicalFilePath();
+    const auto oldAbsolute = oldInfo.absoluteFilePath();
+    const auto newAbsolute = QFileInfo(newPath).absoluteFilePath();
+
+    LatexEditor *editor = nullptr;
+    if (m_openEditors.contains(oldCanonical)) {
+        editor = m_openEditors.take(oldCanonical).data();
+    }
+    if (!editor) {
+        for (int i = 0; i < m_editorTabs->count(); ++i) {
+            auto *candidate = qobject_cast<LatexEditor *>(m_editorTabs->widget(i));
+            if (candidate && QFileInfo(candidate->filePath()).absoluteFilePath() == oldAbsolute) {
+                editor = candidate;
+                m_openEditors.remove(QFileInfo(candidate->filePath()).canonicalFilePath());
+                break;
+            }
+        }
+    }
+    if (!editor) {
+        return;
+    }
+
+    editor->setFilePath(newAbsolute);
+    m_openEditors.insert(QFileInfo(newAbsolute).canonicalFilePath(), editor);
+    const auto tabIndex = m_editorTabs->indexOf(editor);
+    if (tabIndex >= 0) {
+        m_editorTabs->setTabText(tabIndex, QFileInfo(newAbsolute).fileName());
+    }
 }
 
 bool MainWindow::copyDirectoryRecursively(const QString &sourcePath, const QString &destinationPath, QString *errorMessage) const
@@ -1062,6 +1450,41 @@ void MainWindow::openCompiledPdf()
     QDesktopServices::openUrl(QUrl::fromLocalFile(pdfPath));
 }
 
+void MainWindow::savePdfAs()
+{
+    if (activeBuildRoot().isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("No File"), QStringLiteral("Open a LaTeX file or project before saving a PDF."));
+        return;
+    }
+
+    if (m_buildManager.isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Build Running"), QStringLiteral("Wait for the current compile to finish, then save the PDF."));
+        return;
+    }
+
+    const auto config = activeBuildConfig();
+    const auto defaultName = QFileInfo(config.mainFile).completeBaseName() + QStringLiteral(".pdf");
+    const auto defaultPath = QDir(activeBuildRoot()).filePath(defaultName);
+    auto targetPath = QFileDialog::getSaveFileName(this,
+        QStringLiteral("Save As PDF"),
+        defaultPath,
+        QStringLiteral("PDF files (*.pdf);;All files (*.*)"));
+    if (targetPath.isEmpty()) {
+        return;
+    }
+    if (QFileInfo(targetPath).suffix().isEmpty()) {
+        targetPath += QStringLiteral(".pdf");
+    }
+
+    m_pendingPdfSavePath = targetPath;
+    compileProject();
+    if (!m_buildManager.isRunning()) {
+        m_pendingPdfSavePath.clear();
+    } else {
+        statusBar()->showMessage(QStringLiteral("Compiling before saving PDF..."), 5000);
+    }
+}
+
 void MainWindow::copyProject()
 {
     if (m_projectService.projectRoot().isEmpty() || !m_standaloneFilePath.isEmpty()) {
@@ -1120,9 +1543,471 @@ void MainWindow::showPreferences()
     dialog.exec();
 }
 
+void MainWindow::showFindPanel()
+{
+    if (!m_searchPanel || !m_searchText) {
+        return;
+    }
+
+    if (auto *editor = currentEditor()) {
+        const auto selectedText = editor->textCursor().selectedText();
+        if (!selectedText.isEmpty() && !selectedText.contains(QChar::ParagraphSeparator)) {
+            m_searchText->setText(selectedText);
+        }
+    }
+
+    m_searchPanel->setVisible(true);
+    m_searchText->setFocus();
+    m_searchText->selectAll();
+    updateSearchStatus();
+}
+
+void MainWindow::showReplacePanel()
+{
+    showFindPanel();
+    if (m_replaceText) {
+        m_replaceText->setFocus();
+        m_replaceText->selectAll();
+    }
+}
+
+void MainWindow::hideSearchReplacePanel()
+{
+    if (m_searchPanel) {
+        m_searchPanel->hide();
+    }
+    if (auto *editor = currentEditor()) {
+        editor->setFocus();
+    }
+}
+
+void MainWindow::findNextMatch()
+{
+    findTextInCurrentEditor(false);
+}
+
+void MainWindow::findPreviousMatch()
+{
+    findTextInCurrentEditor(true);
+}
+
+void MainWindow::replaceCurrentMatch()
+{
+    auto *editor = currentEditor();
+    if (!editor || !m_searchText || !m_replaceText || m_searchText->text().isEmpty()) {
+        updateSearchStatus(QStringLiteral("No search text"));
+        return;
+    }
+
+    auto cursor = editor->textCursor();
+    const auto selectedText = cursor.selectedText();
+    const auto searchText = m_searchText->text();
+    const auto comparison = m_matchCaseCheck && m_matchCaseCheck->isChecked()
+        ? Qt::CaseSensitive
+        : Qt::CaseInsensitive;
+
+    if (selectedText.compare(searchText, comparison) != 0 && !findTextInCurrentEditor(false)) {
+        return;
+    }
+
+    cursor = editor->textCursor();
+    if (cursor.selectedText().compare(searchText, comparison) == 0) {
+        cursor.insertText(m_replaceText->text());
+        editor->setTextCursor(cursor);
+        findTextInCurrentEditor(false);
+    }
+}
+
+void MainWindow::replaceAllMatches()
+{
+    auto *editor = currentEditor();
+    if (!editor || !m_searchText || !m_replaceText || m_searchText->text().isEmpty()) {
+        updateSearchStatus(QStringLiteral("No search text"));
+        return;
+    }
+
+    QTextDocument::FindFlags flags;
+    if (m_matchCaseCheck && m_matchCaseCheck->isChecked()) {
+        flags |= QTextDocument::FindCaseSensitively;
+    }
+
+    const auto searchText = m_searchText->text();
+    const auto replacementText = m_replaceText->text();
+    QTextCursor editCursor(editor->document());
+    QTextCursor cursor(editor->document());
+    int replacements = 0;
+
+    editCursor.beginEditBlock();
+    while (true) {
+        cursor = editor->document()->find(searchText, cursor, flags);
+        if (cursor.isNull()) {
+            break;
+        }
+        cursor.insertText(replacementText);
+        ++replacements;
+    }
+    editCursor.endEditBlock();
+
+    updateSearchStatus(QStringLiteral("%1 replaced").arg(replacements));
+    editor->setFocus();
+}
+
+bool MainWindow::findTextInCurrentEditor(bool backward)
+{
+    auto *editor = currentEditor();
+    if (!editor || !m_searchText || m_searchText->text().isEmpty()) {
+        updateSearchStatus(QStringLiteral("No search text"));
+        return false;
+    }
+
+    QTextDocument::FindFlags flags;
+    if (backward) {
+        flags |= QTextDocument::FindBackward;
+    }
+    if (m_matchCaseCheck && m_matchCaseCheck->isChecked()) {
+        flags |= QTextDocument::FindCaseSensitively;
+    }
+
+    const auto searchText = m_searchText->text();
+    const auto originalCursor = editor->textCursor();
+    bool found = editor->find(searchText, flags);
+    if (!found) {
+        QTextCursor wrapCursor(editor->document());
+        wrapCursor.movePosition(backward ? QTextCursor::End : QTextCursor::Start);
+        editor->setTextCursor(wrapCursor);
+        found = editor->find(searchText, flags);
+    }
+
+    if (!found) {
+        editor->setTextCursor(originalCursor);
+        updateSearchStatus(QStringLiteral("No matches"));
+        return false;
+    }
+
+    updateSearchStatus(QStringLiteral("Match found"));
+    return true;
+}
+
+void MainWindow::updateSearchStatus(const QString &message)
+{
+    if (!m_searchStatus) {
+        return;
+    }
+    if (!message.isEmpty()) {
+        m_searchStatus->setText(message);
+        return;
+    }
+    if (!m_searchText || m_searchText->text().isEmpty()) {
+        m_searchStatus->clear();
+        return;
+    }
+
+    auto *editor = currentEditor();
+    if (!editor) {
+        m_searchStatus->setText(QStringLiteral("No editor"));
+        return;
+    }
+
+    QTextDocument::FindFlags flags;
+    if (m_matchCaseCheck && m_matchCaseCheck->isChecked()) {
+        flags |= QTextDocument::FindCaseSensitively;
+    }
+
+    QTextCursor cursor(editor->document());
+    int matches = 0;
+    while (true) {
+        cursor = editor->document()->find(m_searchText->text(), cursor, flags);
+        if (cursor.isNull()) {
+            break;
+        }
+        ++matches;
+    }
+
+    m_searchStatus->setText(matches == 1
+        ? QStringLiteral("1 match")
+        : QStringLiteral("%1 matches").arg(matches));
+}
+
+void MainWindow::showProjectTreeContextMenu(const QPoint &position)
+{
+    if (!m_projectTree || m_projectService.projectRoot().isEmpty() || !m_standaloneFilePath.isEmpty()) {
+        return;
+    }
+
+    const auto index = m_projectTree->indexAt(position);
+    const auto path = projectTreePathFromIndex(index);
+    const QFileInfo info(path);
+    const auto parentDirectory = selectedProjectTreeDirectory(index);
+
+    QMenu menu(this);
+    auto *newFileAction = menu.addAction(QStringLiteral("New File..."));
+    connect(newFileAction, &QAction::triggered, this, [this, parentDirectory]() { newFileInProjectTree(parentDirectory); });
+
+    auto *newFolderAction = menu.addAction(QStringLiteral("New Folder..."));
+    connect(newFolderAction, &QAction::triggered, this, [this, parentDirectory]() { newFolderInProjectTree(parentDirectory); });
+
+    menu.addSeparator();
+    if (info.exists() && info.isFile()) {
+        if (info.suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0) {
+            auto *previewAction = menu.addAction(QStringLiteral("Open in Preview"));
+            connect(previewAction, &QAction::triggered, this, [this, path]() { loadPdf(path); });
+
+            auto *externalAction = menu.addAction(QStringLiteral("Open Externally"));
+            connect(externalAction, &QAction::triggered, this, [path]() { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
+        } else {
+            auto *openAction = menu.addAction(QStringLiteral("Open"));
+            connect(openAction, &QAction::triggered, this, [this, path]() { openFileInEditor(path); });
+        }
+
+        if (info.suffix().compare(QStringLiteral("tex"), Qt::CaseInsensitive) == 0) {
+            auto *mainFileAction = menu.addAction(QStringLiteral("Set as Main File"));
+            connect(mainFileAction, &QAction::triggered, this, [this, path]() { setMainFileFromTree(path); });
+        }
+
+        menu.addSeparator();
+        auto *renameAction = menu.addAction(QStringLiteral("Rename..."));
+        connect(renameAction, &QAction::triggered, this, [this, path]() { renameProjectTreeItem(path); });
+
+        auto *deleteAction = menu.addAction(QStringLiteral("Move to Recycle Bin..."));
+        connect(deleteAction, &QAction::triggered, this, [this, path]() { deleteProjectTreeItem(path); });
+    } else if (info.exists() && info.isDir() && isProjectItemPath(path)) {
+        auto *renameAction = menu.addAction(QStringLiteral("Rename..."));
+        connect(renameAction, &QAction::triggered, this, [this, path]() { renameProjectTreeItem(path); });
+
+        auto *deleteAction = menu.addAction(QStringLiteral("Move to Recycle Bin..."));
+        connect(deleteAction, &QAction::triggered, this, [this, path]() { deleteProjectTreeItem(path); });
+    }
+
+    menu.addSeparator();
+    auto *revealAction = menu.addAction(QStringLiteral("Reveal in Explorer"));
+    connect(revealAction, &QAction::triggered, this, [this, path, parentDirectory]() {
+        revealProjectTreeItem(path.isEmpty() ? parentDirectory : path);
+    });
+
+    auto *refreshAction = menu.addAction(QStringLiteral("Refresh"));
+    connect(refreshAction, &QAction::triggered, this, &MainWindow::refreshProjectTree);
+
+    menu.exec(m_projectTree->viewport()->mapToGlobal(position));
+}
+
+void MainWindow::newFileInProjectTree(const QString &parentDirectory)
+{
+    if (!isProjectItemPath(parentDirectory) && QFileInfo(parentDirectory).absoluteFilePath() != QFileInfo(m_projectService.projectRoot()).absoluteFilePath()) {
+        return;
+    }
+
+    bool ok = false;
+    const auto name = QInputDialog::getText(this, QStringLiteral("New File"), QStringLiteral("File name"), QLineEdit::Normal, QStringLiteral("untitled.tex"), &ok).trimmed();
+    if (!ok) {
+        return;
+    }
+    if (!isValidProjectTreeName(name)) {
+        QMessageBox::warning(this, QStringLiteral("New File"), QStringLiteral("Enter a file name without path separators."));
+        return;
+    }
+
+    const auto filePath = QDir(parentDirectory).filePath(name);
+    if (QFileInfo::exists(filePath)) {
+        QMessageBox::warning(this, QStringLiteral("New File"), QStringLiteral("A file or folder with that name already exists."));
+        return;
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, QStringLiteral("New File"), file.errorString());
+        return;
+    }
+    file.close();
+    openFileInEditor(filePath);
+    refreshProjectTree();
+}
+
+void MainWindow::newFolderInProjectTree(const QString &parentDirectory)
+{
+    if (!isProjectItemPath(parentDirectory) && QFileInfo(parentDirectory).absoluteFilePath() != QFileInfo(m_projectService.projectRoot()).absoluteFilePath()) {
+        return;
+    }
+
+    bool ok = false;
+    const auto name = QInputDialog::getText(this, QStringLiteral("New Folder"), QStringLiteral("Folder name"), QLineEdit::Normal, QStringLiteral("New Folder"), &ok).trimmed();
+    if (!ok) {
+        return;
+    }
+    if (!isValidProjectTreeName(name)) {
+        QMessageBox::warning(this, QStringLiteral("New Folder"), QStringLiteral("Enter a folder name without path separators."));
+        return;
+    }
+
+    const auto folderPath = QDir(parentDirectory).filePath(name);
+    if (QFileInfo::exists(folderPath)) {
+        QMessageBox::warning(this, QStringLiteral("New Folder"), QStringLiteral("A file or folder with that name already exists."));
+        return;
+    }
+    if (!QDir(parentDirectory).mkdir(name)) {
+        QMessageBox::warning(this, QStringLiteral("New Folder"), QStringLiteral("Could not create the folder."));
+        return;
+    }
+    refreshProjectTree();
+}
+
+void MainWindow::renameProjectTreeItem(const QString &path)
+{
+    const QFileInfo info(path);
+    if (!info.exists() || !isProjectItemPath(path)) {
+        return;
+    }
+
+    bool ok = false;
+    const auto newName = QInputDialog::getText(this, QStringLiteral("Rename"), QStringLiteral("New name"), QLineEdit::Normal, info.fileName(), &ok).trimmed();
+    if (!ok || newName == info.fileName()) {
+        return;
+    }
+    if (!isValidProjectTreeName(newName)) {
+        QMessageBox::warning(this, QStringLiteral("Rename"), QStringLiteral("Enter a name without path separators."));
+        return;
+    }
+
+    const auto newPath = QDir(info.absolutePath()).filePath(newName);
+    if (QFileInfo::exists(newPath)) {
+        QMessageBox::warning(this, QStringLiteral("Rename"), QStringLiteral("A file or folder with that name already exists."));
+        return;
+    }
+
+    QVector<QPair<QString, QString>> editorMoves;
+    const auto oldAbsolute = info.absoluteFilePath();
+    for (int i = 0; i < m_editorTabs->count(); ++i) {
+        auto *editor = qobject_cast<LatexEditor *>(m_editorTabs->widget(i));
+        if (!editor) {
+            continue;
+        }
+
+        const auto editorPath = QFileInfo(editor->filePath()).absoluteFilePath();
+        const auto affected = info.isDir()
+            ? (editorPath == oldAbsolute || editorPath.startsWith(oldAbsolute + QLatin1Char('/')))
+            : editorPath == oldAbsolute;
+        if (!affected) {
+            continue;
+        }
+        if (!saveEditor(editor)) {
+            return;
+        }
+
+        const auto movedPath = info.isDir()
+            ? QDir(newPath).filePath(QDir(oldAbsolute).relativeFilePath(editorPath))
+            : newPath;
+        editorMoves.append({editorPath, movedPath});
+    }
+
+    if (!QDir(info.absolutePath()).rename(info.fileName(), newName)) {
+        QMessageBox::warning(this, QStringLiteral("Rename"), QStringLiteral("Could not rename the selected item."));
+        return;
+    }
+
+    for (const auto &move : editorMoves) {
+        rekeyOpenEditor(move.first, move.second);
+    }
+    updateMainFileAfterPathChanged(path, newPath);
+    refreshProjectTree();
+    statusBar()->showMessage(QStringLiteral("Renamed %1").arg(info.fileName()), 3000);
+}
+
+void MainWindow::deleteProjectTreeItem(const QString &path)
+{
+    const QFileInfo info(path);
+    if (!info.exists() || !isProjectItemPath(path)) {
+        return;
+    }
+
+    const auto choice = QMessageBox::question(this,
+        QStringLiteral("Move to Recycle Bin"),
+        QStringLiteral("Move \"%1\" to the Recycle Bin?").arg(info.fileName()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (choice != QMessageBox::Yes) {
+        return;
+    }
+
+    for (int i = 0; i < m_editorTabs->count(); ++i) {
+        auto *editor = qobject_cast<LatexEditor *>(m_editorTabs->widget(i));
+        if (!editor) {
+            continue;
+        }
+
+        const auto editorPath = QFileInfo(editor->filePath()).absoluteFilePath();
+        const auto targetPath = info.absoluteFilePath();
+        const auto affected = info.isDir()
+            ? (editorPath == targetPath || editorPath.startsWith(targetPath + QLatin1Char('/')))
+            : editorPath == targetPath;
+        if (affected && !saveEditor(editor)) {
+            return;
+        }
+    }
+
+    if (!QFile::moveToTrash(path)) {
+        QMessageBox::warning(this, QStringLiteral("Move to Recycle Bin"), QStringLiteral("Could not move the selected item to the Recycle Bin."));
+        return;
+    }
+
+    closeEditorForPath(path);
+    updateMainFileAfterPathChanged(path, {});
+    refreshProjectTree();
+    statusBar()->showMessage(QStringLiteral("Moved %1 to the Recycle Bin").arg(info.fileName()), 4000);
+}
+
+void MainWindow::revealProjectTreeItem(const QString &path)
+{
+    if (path.isEmpty()) {
+        return;
+    }
+
+    const QFileInfo info(path);
+    if (info.exists() && info.isFile()) {
+        QProcess::startDetached(QStringLiteral("explorer.exe"), {QStringLiteral("/select,"), QDir::toNativeSeparators(info.absoluteFilePath())});
+        return;
+    }
+
+    const auto folderPath = info.exists() && info.isDir() ? info.absoluteFilePath() : info.absolutePath();
+    QDesktopServices::openUrl(QUrl::fromLocalFile(folderPath));
+}
+
+void MainWindow::setMainFileFromTree(const QString &texPath)
+{
+    const QFileInfo info(texPath);
+    if (!info.exists()
+        || !info.isFile()
+        || info.suffix().compare(QStringLiteral("tex"), Qt::CaseInsensitive) != 0
+        || !isProjectItemPath(texPath)) {
+        return;
+    }
+
+    auto config = m_projectService.config();
+    config.mainFile = QDir::cleanPath(QDir(m_projectService.projectRoot()).relativeFilePath(info.absoluteFilePath()));
+    QString error;
+    m_projectService.setConfig(config);
+    if (!m_projectService.saveConfig(&error)) {
+        QMessageBox::warning(this, QStringLiteral("Set Main File"), error);
+        return;
+    }
+
+    m_projectTreeModel.setProjectMetadata(m_projectService.projectRoot(), config.mainFile, config.outputDirectory);
+    statusBar()->showMessage(QStringLiteral("Main file set to %1").arg(config.mainFile), 4000);
+}
+
+void MainWindow::refreshProjectTree()
+{
+    if (m_projectService.projectRoot().isEmpty()) {
+        return;
+    }
+
+    const auto config = m_projectService.config();
+    const auto rootIndex = m_fileSystemModel.setRootPath(m_projectService.projectRoot());
+    m_projectTreeModel.setProjectMetadata(m_projectService.projectRoot(), config.mainFile, config.outputDirectory);
+    m_projectTree->setRootIndex(m_projectTreeModel.mapFromSource(rootIndex));
+}
+
 void MainWindow::onTreeActivated(const QModelIndex &index)
 {
-    const auto path = m_fileSystemModel.filePath(index);
+    const auto path = projectTreePathFromIndex(index);
     const QFileInfo info(path);
     if (!info.isFile()) {
         return;
@@ -1141,7 +2026,9 @@ void MainWindow::onDiagnosticActivated(const QModelIndex &index)
     }
     const auto &diagnostic = m_diagnosticsModel.diagnosticAt(index.row());
     if (!diagnostic.filePath.isEmpty()) {
-        openFileInEditor(diagnostic.filePath, diagnostic.line);
+        if (openFileInEditor(diagnostic.filePath, diagnostic.line) && diagnostic.line > 0) {
+            syncSourceToPdf(diagnostic.filePath, diagnostic.line, 1);
+        }
     }
 }
 
@@ -1165,10 +2052,33 @@ void MainWindow::onBuildFinished(bool success, const QString &pdfPath, QVector<D
 {
     const auto wasPreview = m_currentBuildIsPreview;
     const auto runQueuedPreview = wasPreview && m_livePreviewQueued && m_liveCompileEnabled && !activeBuildRoot().isEmpty();
+    const auto pendingPdfSavePath = wasPreview ? QString() : m_pendingPdfSavePath;
+    if (!wasPreview) {
+        m_pendingPdfSavePath.clear();
+    }
     m_diagnosticsModel.setDiagnostics(mapPreviewDiagnostics(std::move(diagnostics)));
     if (success) {
         loadPdf(pdfPath);
-        statusBar()->showMessage(wasPreview ? QStringLiteral("Live preview updated") : QStringLiteral("Build finished"), 5000);
+        if (!pendingPdfSavePath.isEmpty()) {
+            const QFileInfo sourceInfo(pdfPath);
+            const QFileInfo targetInfo(pendingPdfSavePath);
+            QDir targetDir = targetInfo.absoluteDir();
+            if (!sourceInfo.exists()) {
+                QMessageBox::warning(this, QStringLiteral("Save PDF Failed"), QStringLiteral("The compiler finished, but the PDF file was not found."));
+                statusBar()->showMessage(QStringLiteral("PDF save failed"), 5000);
+            } else if (sourceInfo.absoluteFilePath() == targetInfo.absoluteFilePath()) {
+                statusBar()->showMessage(QStringLiteral("PDF saved to %1").arg(QDir::toNativeSeparators(pendingPdfSavePath)), 6000);
+            } else if ((!targetDir.exists() && !targetDir.mkpath(QStringLiteral(".")))
+                || (targetInfo.exists() && !QFile::remove(pendingPdfSavePath))
+                || !QFile::copy(pdfPath, pendingPdfSavePath)) {
+                QMessageBox::warning(this, QStringLiteral("Save PDF Failed"), QStringLiteral("Could not write the selected PDF file."));
+                statusBar()->showMessage(QStringLiteral("PDF save failed"), 5000);
+            } else {
+                statusBar()->showMessage(QStringLiteral("PDF saved to %1").arg(QDir::toNativeSeparators(pendingPdfSavePath)), 6000);
+            }
+        } else {
+            statusBar()->showMessage(wasPreview ? QStringLiteral("Live preview updated") : QStringLiteral("Build finished"), 5000);
+        }
     } else {
         if (wasPreview) {
             m_pendingPreviewBuildRoot.reset();
