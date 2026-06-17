@@ -2,7 +2,8 @@ param(
     [string]$BuildDir = "build",
     [ValidateSet("debug", "release")]
     [string]$Config = "debug",
-    [string]$IsccPath = ""
+    [string]$IsccPath = "",
+    [string]$ReleaseDir = "releases"
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,4 +84,21 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "Installer created under $(Join-Path $buildRootPath 'installer')."
+$versionLine = Select-String -Path $issPath -Pattern '^\#define MyAppVersion "(.+)"$' | Select-Object -First 1
+$appVersion = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { "unknown" }
+$installerName = "LaTeXAppSetup-$appVersion.exe"
+$installerPath = Join-Path (Join-Path $buildRootPath "installer") $installerName
+
+if (-not (Test-Path $installerPath)) {
+    Write-Error "Expected installer was not found at '$installerPath'."
+}
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$releasePath = Join-Path $repoRoot $ReleaseDir
+New-Item -Path $releasePath -ItemType Directory -Force | Out-Null
+
+$releaseInstallerPath = Join-Path $releasePath $installerName
+Copy-Item -LiteralPath $installerPath -Destination $releaseInstallerPath -Force
+
+Write-Host "Installer created at $installerPath"
+Write-Host "Release copy created at $releaseInstallerPath"

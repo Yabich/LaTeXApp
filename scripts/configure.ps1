@@ -2,6 +2,8 @@ param(
     [string]$QtPrefix = "",
 
     [string]$BuildDir = "build",
+    [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
+    [string]$BuildType = "Release",
     [ValidateSet("msvc", "mingw")]
     [string]$Toolchain = "msvc"
 )
@@ -51,7 +53,7 @@ if ($Toolchain -eq "msvc") {
         exit 1
     }
 
-    $command = "`"$vsDevCmd`" -arch=x64 -host_arch=x64 && cmake -S `"$PWD`" -B `"$BuildDir`" -G `"NMake Makefiles`" -DCMAKE_PREFIX_PATH=`"$QtPrefix`""
+    $command = "`"$vsDevCmd`" -arch=x64 -host_arch=x64 && cmake -S `"$PWD`" -B `"$BuildDir`" -G `"NMake Makefiles`" -DCMAKE_PREFIX_PATH=`"$QtPrefix`" -DCMAKE_BUILD_TYPE=`"$BuildType`""
     cmd.exe /s /c $command
     exit $LASTEXITCODE
 }
@@ -70,6 +72,7 @@ if (-not (Test-Path "$mingwRoot\lib\cmake\Qt6")) {
 cmake -S . -B $BuildDir `
     -G "MinGW Makefiles" `
     -DCMAKE_PREFIX_PATH="$mingwRoot" `
+    -DCMAKE_BUILD_TYPE="$BuildType" `
     -DCMAKE_C_COMPILER="$mingwRoot\bin\gcc.exe" `
     -DCMAKE_CXX_COMPILER="$mingwRoot\bin\g++.exe" `
     -DCMAKE_MAKE_PROGRAM="$mingwRoot\bin\mingw32-make.exe"

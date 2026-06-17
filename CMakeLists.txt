@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
 
 project(LaTeXApp
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Windows desktop LaTeX editor"
     LANGUAGES CXX
 )
@@ -61,9 +61,23 @@ set(LATEXAPP_SOURCES
     src/widgets/LatexHighlighter.h
 )
 
+configure_file(
+    src/resources/app.rc.in
+    ${CMAKE_BINARY_DIR}/generated/latexapp.rc
+    @ONLY
+)
+
 qt_add_executable(latexapp WIN32 ${LATEXAPP_SOURCES})
 
 target_include_directories(latexapp PRIVATE src)
+
+target_compile_definitions(latexapp PRIVATE
+    LATEXAPP_VERSION="${PROJECT_VERSION}"
+)
+
+target_sources(latexapp PRIVATE
+    ${CMAKE_BINARY_DIR}/generated/latexapp.rc
+)
 
 target_link_libraries(latexapp PRIVATE
     Qt6::Widgets

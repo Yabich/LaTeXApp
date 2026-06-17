@@ -35,7 +35,7 @@ int main(int argc, char *argv[])
     applyLightTheme(application);
     QApplication::setOrganizationName(QStringLiteral("LaTeXApp"));
     QApplication::setApplicationName(QStringLiteral("LaTeXApp"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral(LATEXAPP_VERSION));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Windows desktop LaTeX editor"));

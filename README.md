@@ -42,7 +42,7 @@ For document compilation, the installer checks for a TeX distribution and Perl:
 Recommended MSVC build:
 
 ```powershell
-.\scripts\configure.ps1 -QtPrefix "C:\Qt\6.11.1\msvc2022_64"
+.\scripts\configure.ps1 -QtPrefix "C:\Qt\6.11.1\msvc2022_64" -BuildType Release
 .\scripts\build.ps1
 .\scripts\deploy.ps1
 .\scripts\test.ps1
@@ -69,11 +69,11 @@ Run `scripts\deploy.ps1` after building before launching from Explorer. It copie
 ## Create The Windows Installer
 
 ```powershell
-.\scripts\make-installer.ps1 -Config debug
+.\scripts\release.ps1 -QtPrefix "C:\Qt\6.11.1\msvc2022_64"
 ```
 
-The script creates `build\package`, copies `LaTeXApp.exe`, runs `windeployqt`, copies templates, and compiles `build\installer\latexapp.iss`.
-The resulting installer is written under `build\installer`.
+The release script configures, builds, runs tests, creates `build\package`, copies `LaTeXApp.exe`, runs `windeployqt`, copies templates, and compiles `build\installer\latexapp.iss`.
+The versioned installer is written under `build\installer` and copied to `releases\LaTeXAppSetup-1.0.0.exe`
 
 ## Run the Windows Installer 
 
